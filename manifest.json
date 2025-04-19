@@ -1,0 +1,11 @@
+{
+    "display_name": "聊天记录快速恢复",
+    "loading_order": 5,
+    "requires": [],
+    "optional": [],
+    "js": "index.js",
+    "css": "style.css",
+    "author": "uhhhh15",
+    "version": "1.0.0",
+    "homePage": ""
+}
