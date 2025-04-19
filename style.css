@@ -1,0 +1,137 @@
+/* 聊天自动备份插件样式 */
+
+/* 确保备份操作区域内的所有按钮文本都不换行 */
+.backup_actions .menu_button { /* 应用到恢复和删除按钮 */
+    white-space: nowrap;
+}
+
+/* 假设手动备份按钮的 ID 是 #chat_backup_manual_backup */
+/* 或者，如果它也在 .chat_backup_controls 容器内，可以更通用地选择 */
+.chat_backup_controls button { /* 应用到控制区域内的所有按钮 */
+    white-space: nowrap;
+}
+
+
+/* 备份列表容器 */
+.backup_list_container {
+    margin-top: 15px;
+    border: 1px solid var(--border-color);
+    border-radius: 10px;
+    overflow: hidden;
+}
+
+.backup_list_header {
+    background-color: rgba(0, 0, 0, 0.2);
+    padding: 8px 15px;
+}
+
+.backup_list_header h3 {
+    margin: 0;
+    font-size: 16px;
+}
+
+.backup_list {
+    max-height: 500px;
+    overflow-y: auto;
+    padding: 10px;
+}
+
+/* 控制区域 */
+.chat_backup_controls {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 10px;
+    margin: 15px 0;
+    padding: 10px;
+    background-color: rgba(0, 0, 0, 0.1);
+    border-radius: 10px;
+}
+
+.chat_backup_control_item {
+    margin: 5px;
+}
+
+/* 单个备份项目 */
+.backup_item {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 12px;
+    margin-bottom: 10px;
+    background-color: rgba(0, 0, 0, 0.15);
+    border: 1px solid var(--border-color);
+    border-radius: 8px;
+    transition: background-color 0.2s;
+}
+
+.backup_item:hover {
+    background-color: rgba(0, 0, 0, 0.25);
+}
+
+.backup_info {
+    flex: 1;
+    overflow: hidden;
+}
+
+.backup_header {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    margin-bottom: 5px;
+}
+
+.backup_entity {
+    font-weight: bold;
+    color: var(--SmColor);
+}
+
+.backup_chat {
+    color: var(--infoCardText);
+}
+
+.backup_mesid, .backup_date {
+    font-size: 0.85em;
+    opacity: 0.85;
+}
+
+.backup_preview {
+    font-style: italic;
+    opacity: 0.7;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    max-width: 100%;
+}
+
+.backup_actions {
+    margin-left: 10px;
+}
+
+.backup_restore {
+    white-space: nowrap;
+}
+
+.backup_empty_notice {
+    text-align: center;
+    padding: 30px;
+    opacity: 0.6;
+    font-style: italic;
+}
+
+.chat_backup_description {
+    margin-bottom: 15px;
+    opacity: 0.8;
+    font-size: 0.95em;
+    line-height: 1.5;
+}
+
+/* 复选框样式 */
+.checkbox_label {
+    display: inline-flex;
+    align-items: center;
+    cursor: pointer;
+}
+
+.checkbox_label input[type="checkbox"] {
+    margin-right: 5px;
+}
