@@ -1034,7 +1034,7 @@ jQuery(async () => {
                 });
 
                 if (backup) {
-                    if (confirm(`确定要恢复 “${backup.entityName} - ${backup.chatName}” 的备份吗？\n\n这将选中对应的角色/群组，并创建一个【新的聊天】来恢复备份内容。\n\n当前聊天内容不会丢失，但请确保已保存。`)) {
+                    if (confirm(`确定要恢复 “${backup.entityName} - ${backup.chatName}” 的备份吗？\n\n这将选中对应的角色/群组，来恢复备份聊天记录。`)) {
                         const success = await restoreBackup(backup);
                         if (success) {
                             toastr.success('聊天记录已成功恢复到新聊天');
