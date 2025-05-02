@@ -25,6 +25,7 @@ import {
     saveChat,               // 用于插件强制保存聊天
     characters,             // 需要访问角色列表来查找索引
     getThumbnailUrl,        // 可能需要获取头像URL（虽然备份里应该有）
+    openCharacterChat,
     // --- 其他可能需要的函数 ---
     // clearChat, // 可能不需要，doNewChat 应该会处理
     // getCharacters, // 切换角色后可能需要更新？selectCharacterById 内部应该会处理
@@ -33,11 +34,16 @@ import {
 import {
     // --- 群组相关函数 ---
     select_group_chats,     // 用于选择群组聊天
+    openGroupChat,
     // getGroupChat, // 可能不需要，select_group_chats 应该会处理
 } from '../../../group-chats.js';
 
+import {
+    waitUntilCondition
+} from '../../../utils.js';
+
 // 扩展名和设置初始化
-const PLUGIN_NAME = 'chat-history-backup';
+const PLUGIN_NAME = 'chat-history-backup8';
 const DEFAULT_SETTINGS = {
     maxTotalBackups: 3,        // 整个系统保留的最大备份数量
     backupDebounceDelay: 1000, // 防抖延迟时间 (毫秒)
@@ -643,19 +649,50 @@ async function performManualBackup() {
     toastr.success('已手动备份当前聊天', '聊天自动备份');
 }
 
+// --- 工具函数：等待 CHAT_CHANGED 事件 ---
+// 功能：返回一个 Promise，该 Promise 在 CHAT_CHANGED 事件触发且满足特定条件时 resolve，
+//       或者在超时后 reject。
+function waitForChatChange(expectedConditionFn, description, timeoutMs = 7000) {
+    return new Promise((resolve, reject) => {
+        let listener;
+        logDebug(`waitForChatChange: 开始等待 "${description}" (超时: ${timeoutMs}ms)`);
+
+        const timeout = setTimeout(() => {
+            if (listener) {
+                // *** 修改点：使用 removeListener ***
+                eventSource.removeListener(event_types.CHAT_CHANGED, listener);
+                logDebug(`waitForChatChange: 等待 "${description}" (CHAT_CHANGED) 超时!`);
+            }
+            reject(new Error(`等待 "${description}" (CHAT_CHANGED) 超时 (${timeoutMs}ms)`));
+        }, timeoutMs);
+
+        listener = (receivedChatId) => {
+            const currentContext = getContext();
+            logDebug(`waitForChatChange: 收到 CHAT_CHANGED 事件 (ID: ${receivedChatId}), 检查条件 "${description}"...`);
+            if (expectedConditionFn(receivedChatId, currentContext)) {
+                logDebug(`waitForChatChange: 条件满足 ("${description}"). Received Chat ID: ${receivedChatId}`);
+                clearTimeout(timeout);
+                // *** 修改点：使用 removeListener ***
+                eventSource.removeListener(event_types.CHAT_CHANGED, listener);
+                requestAnimationFrame(() => resolve(receivedChatId));
+            } else {
+                logDebug(`waitForChatChange: 条件未满足 ("${description}"). Received Chat ID: ${receivedChatId}, Context Group: ${currentContext.groupId}, Context Char: ${currentContext.characterId}, Context Chat: ${currentContext.chatId}. 继续等待...`);
+            }
+        };
+        // 添加监听器仍然是 .on
+        eventSource.on(event_types.CHAT_CHANGED, listener);
+    });
+}
+
 // --- 恢复逻辑 ---
 // index.js (内部的 restoreBackup 函数 - 审查和优化)
 async function restoreBackup(backupData) {
-    // --- 入口与基本信息提取 ---
     console.log('[聊天自动备份] 开始恢复备份:', { chatKey: backupData.chatKey, timestamp: backupData.timestamp });
     const isGroup = backupData.chatKey.startsWith('group_');
     const entityIdMatch = backupData.chatKey.match(
-        isGroup
-        ? /group_(\w+)_/ // 匹配群组ID
-        : /^char_(\d+)/  // 匹配角色ID (索引)
+        isGroup ? /group_(\w+)_/ : /^char_(\d+)/
     );
     let entityId = entityIdMatch ? entityIdMatch[1] : null;
-    let targetCharIndex = -1; // 保存角色索引，以便稍后切回
 
     if (!entityId) {
         console.error('[聊天自动备份] 无法从备份数据中提取角色/群组ID:', backupData.chatKey);
@@ -663,151 +700,213 @@ async function restoreBackup(backupData) {
         return false;
     }
 
-    logDebug(`恢复目标: ${isGroup ? '群组' : '角色'} ID/标识: ${entityId}`);
-
-    // *** 保存当前选中的实体 ID 和类型，以便最后切回 ***
     const entityToRestore = {
         isGroup: isGroup,
-        id: entityId,
-        charIndex: -1 // 初始化
+        id: entityId, // 群组是 ID，角色是索引字符串
+        charIndex: -1 // 如果是角色，需要找到数字索引
     };
+
     if (!isGroup) {
         entityToRestore.charIndex = parseInt(entityId, 10);
         if (isNaN(entityToRestore.charIndex) || entityToRestore.charIndex < 0 || entityToRestore.charIndex >= characters.length) {
-             console.error(`[聊天自动备份] 角色索引无效: ${entityId}`);
-             toastr.error(`无效的角色索引 ${entityId}`);
-             return false;
+            console.error(`[聊天自动备份] 角色索引无效: ${entityId}`);
+            toastr.error(`无效的角色索引 ${entityId}`);
+            return false;
         }
     }
 
+    logDebug(`恢复目标: ${isGroup ? '群组' : '角色'} ID/索引: ${entityToRestore.isGroup ? entityToRestore.id : entityToRestore.charIndex}`);
+
+    let newChatId = null; // 将用于存储新创建的聊天ID
+
     try {
-        // --- 步骤 1: 切换上下文 --- (如果当前不是目标，则切换；如果已经是，则跳过)
+        // --- 步骤 1: 切换上下文 (如果需要) ---
         const initialContext = getContext();
-        const needsContextSwitch = (isGroup && initialContext.groupId !== entityId) ||
-                                   (!isGroup && String(initialContext.characterId) !== entityId);
+        const needsContextSwitch = (isGroup && initialContext.groupId !== entityToRestore.id) ||
+                                   (!isGroup && String(initialContext.characterId) !== String(entityToRestore.charIndex));
 
         if (needsContextSwitch) {
+            logDebug('步骤 1: 需要切换上下文，开始切换...');
+            const switchPromise = isGroup
+                ? select_group_chats(entityToRestore.id)
+                : selectCharacterById(entityToRestore.charIndex, { switchMenu: false });
+
             try {
-                logDebug('步骤 1: 需要切换上下文，开始切换...');
-                if (isGroup) {
-                    await select_group_chats(entityId);
-                } else {
-                    await selectCharacterById(entityToRestore.charIndex, { switchMenu: false });
-                }
-                await new Promise(resolve => setTimeout(resolve, 500)); // 等待切换完成
-                logDebug('步骤 1: 上下文切换完成');
-            } catch (switchError) {
-                console.error('[聊天自动备份] 步骤 1 失败: 切换角色/群组失败:', switchError);
-                toastr.error(`切换上下文失败: ${switchError.message || switchError}`);
+                await switchPromise; // 等待切换函数本身的 Promise 完成 (如果它返回的话)
+                logDebug('步骤 1: 切换函数调用完成，等待 CHAT_CHANGED 确认...');
+                // 等待 CHAT_CHANGED 事件确认上下文确实已更新
+                await waitForChatChange(
+                    (receivedChatId, currentContext) => { // 检查函数
+                        return (isGroup && currentContext.groupId === entityToRestore.id) ||
+                               (!isGroup && String(currentContext.characterId) === String(entityToRestore.charIndex));
+                    },
+                    `切换到 ${isGroup ? '群组' : '角色'} ${entityToRestore.isGroup ? entityToRestore.id : entityToRestore.charIndex}` // 描述
+                );
+                logDebug('步骤 1: 上下文切换完成并已通过 CHAT_CHANGED 确认');
+            } catch (error) {
+                console.error('[聊天自动备份] 步骤 1 失败: 切换或等待确认失败:', error);
+                toastr.error(`切换上下文失败: ${error.message || '未知错误'}`);
                 return false;
             }
         } else {
             logDebug('步骤 1: 当前已在目标上下文，跳过切换');
         }
 
-
         // --- 步骤 2: 创建新聊天 ---
-        let originalChatIdBeforeNewChat = getContext().chatId;
-        logDebug('步骤 2: 开始创建新聊天...');
-        await doNewChat({ deleteCurrentChat: false });
-        await new Promise(resolve => setTimeout(resolve, 1000));
-        logDebug('步骤 2: 新聊天创建完成');
+        const contextBeforeNewChat = getContext();
+        const originalChatIdBeforeNewChat = contextBeforeNewChat.chatId;
+        logDebug(`步骤 2: 开始创建新聊天... (当前 chatId: ${originalChatIdBeforeNewChat})`);
+        try {
+            await doNewChat({ deleteCurrentChat: false });
+            logDebug('步骤 2: doNewChat 调用完成，等待 CHAT_CHANGED 确认新聊天 ID...');
 
-        // --- 步骤 3: 获取新聊天 ID ---
-        logDebug('步骤 3: 获取新聊天 ID...');
-        let contextAfterNewChat = getContext();
-        const newChatId = contextAfterNewChat.chatId;
-
-        if (!newChatId || newChatId === originalChatIdBeforeNewChat) {
-            console.error('[聊天自动备份] 步骤 3 失败: 未能获取有效的新 chatId');
-            toastr.error('未能获取新聊天的ID，无法继续恢复');
+            // 等待 CHAT_CHANGED 事件，确认 chatId 已经改变
+            newChatId = await waitForChatChange(
+                (receivedChatId, currentContext) => { // 检查函数
+                    // 条件：收到的 chatId 存在且不同于创建前的 chatId
+                    return receivedChatId && receivedChatId !== originalChatIdBeforeNewChat;
+                },
+                "确认新聊天创建" // 描述
+            );
+            logDebug(`步骤 2: 新聊天创建并确认完成，新聊天 ID: ${newChatId}`);
+        } catch (error) {
+            console.error('[聊天自动备份] 步骤 2 失败: 创建新聊天或等待确认失败:', error);
+            toastr.error(`创建新聊天失败: ${error.message || '未知错误'}`);
             return false;
         }
-        logDebug(`步骤 3: 新聊天ID: ${newChatId}`);
-        // 上下文验证可以简化或移除，因为后续会强制切换回来
+
+        // --- 步骤 3: (隐式完成) 获取新聊天 ID 已在步骤 2 完成 ---
 
         // --- 步骤 4: 准备聊天内容和元数据 ---
-        // (保持不变)
         logDebug('步骤 4: 准备内存中的聊天内容和元数据...');
-        const chatToSave = structuredClone(backupData.chat);
-        let metadataToSave = {};
-        // ... (元数据处理保持不变) ...
+        let chatToSave, metadataToSave;
+        try {
+            chatToSave = structuredClone(backupData.chat);
+            metadataToSave = structuredClone(backupData.metadata || {});
+            logDebug('步骤 4: 使用 structuredClone 成功拷贝数据');
+        } catch (cloneError) {
+            logDebug('步骤 4: structuredClone 失败，尝试 JSON 序列化回退...');
+            try {
+                chatToSave = JSON.parse(JSON.stringify(backupData.chat));
+                metadataToSave = JSON.parse(JSON.stringify(backupData.metadata || {}));
+                logDebug('步骤 4: 使用 JSON 序列化成功拷贝数据');
+            } catch (jsonError) {
+                console.error('[聊天自动备份] 步骤 4 失败: 深拷贝聊天数据失败:', jsonError);
+                toastr.error('准备恢复数据时出错');
+                return false;
+            }
+        }
+        // (可以添加元数据调整逻辑，如重命名)
+        // metadataToSave.name = `恢复自 ${new Date(backupData.timestamp).toLocaleDateString()}`;
         logDebug(`步骤 4: 准备完成, 消息数: ${chatToSave.length}, 元数据:`, metadataToSave);
 
         // --- 步骤 5: 保存恢复的数据到新聊天文件 ---
-        // (保持不变，临时修改全局状态以保存)
-        logDebug(`步骤 5: 临时替换全局 chat 和 metadata 以便保存...`);
+        logDebug(`步骤 5: 准备保存恢复数据到新文件 "${newChatId}"...`);
         let globalContext = getContext();
+        // *** 再次确认当前上下文是新创建的聊天 ***
+        if (globalContext.chatId !== newChatId) {
+            console.error(`[聊天自动备份] 步骤 5 错误: 上下文意外切换! 预期: ${newChatId}, 实际: ${globalContext.chatId}. 中止保存。`);
+            toastr.error('保存恢复数据前上下文检查失败，操作中止。');
+            return false;
+        }
+        logDebug(`步骤 5: 上下文确认 (${newChatId}). 临时替换全局 chat 和 metadata...`);
         let originalGlobalChat = globalContext.chat.slice();
         let originalGlobalMetadata = structuredClone(globalContext.chat_metadata);
 
-        globalContext.chat.length = 0;
-        chatToSave.forEach(msg => globalContext.chat.push(msg));
-        updateChatMetadata(metadataToSave, true);
-
-        logDebug(`步骤 5: 即将调用 saveChat({ chatName: ${newChatId}, force: true }) 保存恢复的数据...`);
         try {
+            // 修改全局状态以匹配要保存的内容
+            globalContext.chat.length = 0;
+            chatToSave.forEach(msg => globalContext.chat.push(msg));
+            updateChatMetadata(metadataToSave, true); // true 表示完全替换
+
+            logDebug(`步骤 5: 即将调用 saveChat({ chatName: "${newChatId}", force: true }) ...`);
             await saveChat({ chatName: newChatId, force: true });
             logDebug('步骤 5: saveChat 调用完成');
         } catch (saveError) {
             console.error("[聊天自动备份] 步骤 5 失败: saveChat 调用时出错:", saveError);
             toastr.error(`保存恢复的聊天失败: ${saveError.message}`, '聊天自动备份');
-            // 恢复状态
+            // 回滚内存状态并返回
             globalContext.chat.length = 0;
             originalGlobalChat.forEach(msg => globalContext.chat.push(msg));
             updateChatMetadata(originalGlobalMetadata, true);
             return false;
         } finally {
-             // 恢复状态
-             globalContext.chat.length = 0;
-             originalGlobalChat.forEach(msg => globalContext.chat.push(msg));
-             updateChatMetadata(originalGlobalMetadata, true);
-             logDebug('步骤 5: 全局 chat 和 metadata 已恢复到保存前状态');
+            // 无论成功失败，恢复全局内存状态到 saveChat 调用前的状态（空聊天状态）
+            globalContext.chat.length = 0;
+            originalGlobalChat.forEach(msg => globalContext.chat.push(msg));
+            updateChatMetadata(originalGlobalMetadata, true);
+            logDebug('步骤 5: 全局 chat 和 metadata 已恢复到保存前状态');
         }
 
-        // --- 步骤 6: 强制重加载 - 通过关闭再打开 ---
-        logDebug('步骤 6: 开始强制重加载流程 (关闭再打开)...');
+        // --- 步骤 6: 强制重加载 UI (Close/Reopen Hack - 使用更可靠的等待) ---
+        logDebug('步骤 6: 开始强制重加载流程 (关闭 -> 重选 -> 打开恢复的聊天)...');
         try {
             // 6a: 触发关闭聊天
-            logDebug("步骤 6a: 触发 '关闭聊天' (模拟点击 #option_close_chat)");
+            logDebug("步骤 6a: 触发 '关闭聊天' ...");
             const closeButton = document.getElementById('option_close_chat');
-            if (closeButton) {
-                closeButton.click();
-            } else {
-                console.warn("未能找到 #option_close_chat 按钮来触发关闭");
-                // 如果找不到按钮，可能需要其他方式，但点击通常是最直接的
-            }
-            await new Promise(resolve => setTimeout(resolve, 800)); // 等待关闭动画和状态更新
+            if (!closeButton) throw new Error("未能找到 #option_close_chat 按钮");
+            closeButton.click();
+            // 添加短暂延迟，确保事件循环处理点击
+            await new Promise(resolve => requestAnimationFrame(resolve)); // 等待下一帧
+            logDebug("步骤 6a: '关闭聊天' 已触发，继续后续步骤...");
 
-            // 6b: 触发重新选择目标实体
-            logDebug(`步骤 6b: 重新选择目标 ${entityToRestore.isGroup ? '群组' : '角色'} ID: ${entityToRestore.id}`);
-            if (entityToRestore.isGroup) {
-                await select_group_chats(entityToRestore.id);
-            } else {
-                await selectCharacterById(entityToRestore.charIndex, { switchMenu: false });
-            }
-            await new Promise(resolve => setTimeout(resolve, 1000)); // 等待加载和渲染完成
+            // 6b: 触发重新选择目标实体并等待确认
+            logDebug(`步骤 6b: 重新选择目标 ${entityToRestore.isGroup ? '群组' : '角色'} ID/索引: ${entityToRestore.isGroup ? entityToRestore.id : entityToRestore.charIndex} 并等待 CHAT_CHANGED 确认实体加载...`);
+            const reselectPromise = entityToRestore.isGroup
+                ? select_group_chats(entityToRestore.id)
+                : selectCharacterById(entityToRestore.charIndex, { switchMenu: false });
 
-            logDebug('步骤 6: 关闭再打开流程完成，UI应已正确加载');
+            await reselectPromise; // 等待选择函数本身的 Promise
+            // 等待 CHAT_CHANGED 确认实体已加载 (加载的是默认聊天或上次聊天)
+            await waitForChatChange(
+                (receivedChatId, currentContext) => { // 检查函数
+                    return (isGroup && currentContext.groupId === entityToRestore.id) ||
+                           (!isGroup && String(currentContext.characterId) === String(entityToRestore.charIndex));
+                },
+                `确认重新选择 ${isGroup ? '群组' : '角色'} ${entityToRestore.isGroup ? entityToRestore.id : entityToRestore.charIndex}` // 描述
+            );
+            logDebug("步骤 6b: 目标实体已重新加载并确认");
+
+            // 6c: 显式打开刚刚保存了数据的聊天文件
+            logDebug(`步骤 6c: 显式打开恢复后的聊天文件: "${newChatId}" 并等待 CHAT_CHANGED 确认加载...`);
+            const openRestoredPromise = isGroup
+                ? openGroupChat(entityToRestore.id, newChatId) // 群组需要 entityId 和 chatId
+                : openCharacterChat(newChatId);             // 角色只需要 chatId (文件名)
+
+            await openRestoredPromise; // 等待打开函数本身的 Promise
+            // 等待 CHAT_CHANGED 确认我们 *精确地* 加载了恢复的聊天
+            await waitForChatChange(
+                (receivedChatId, currentContext) => { // 检查函数
+                    // 条件：收到的 chatId 必须等于我们恢复到的那个 chatId
+                    return receivedChatId === newChatId;
+                },
+                `确认打开恢复的聊天 "${newChatId}"` // 描述
+            );
+            logDebug(`步骤 6c: 已成功加载并确认恢复的聊天: "${newChatId}"`);
+
+            logDebug('步骤 6: 关闭再打开流程完成，UI 应已正确加载恢复的聊天');
+
         } catch (reloadError) {
             console.error('[聊天自动备份] 步骤 6 失败: 关闭或重新打开聊天时出错:', reloadError);
-            toastr.error('重新加载恢复的聊天内容失败，请尝试手动切换聊天。数据已保存。');
+            toastr.error(`重新加载恢复的聊天内容失败: ${reloadError.message || '未知错误'}. 数据已保存为 "${newChatId}"，请尝试手动切换。`);
+            // 尽管 UI 加载可能失败，但数据已保存，流程继续，返回 true
         }
 
-        // --- 步骤 7: 触发事件 ---
-        // (保持不变，但现在上下文应该是正确的)
-        logDebug('步骤 7: 触发 CHAT_CHANGED 事件...');
-        const finalContext = getContext();
-        eventSource.emit(event_types.CHAT_CHANGED, finalContext.chatId);
+        // --- 步骤 7: (可选) 可以移除手动触发 CHAT_CHANGED 的代码 ---
 
         // --- 结束 ---
         console.log('[聊天自动备份] 恢复流程完成');
-        return true;
+        toastr.success(`聊天记录已成功恢复到新聊天 "${newChatId}"`);
+        return true; // 表示恢复操作（数据保存）成功
 
     } catch (error) {
+        // 捕获整个流程中未被内部 catch 处理的意外错误
         console.error('[聊天自动备份] 恢复聊天过程中发生未预料的严重错误:', error);
         toastr.error(`恢复失败: ${error.message || '未知错误'}`, '聊天自动备份');
         return false;
+    } finally {
+        // 可以在这里添加通用的清理逻辑，例如恢复按钮状态（如果在这个函数内管理的话）
+        logDebug('[聊天自动备份] 恢复函数执行完毕 (finally)');
     }
 }
 
@@ -848,12 +947,13 @@ async function updateBackupsList() {
                             <span class="backup_chat" title="${backup.chatName}">${backup.chatName || '未知聊天'}</span>
                         </div>
                          <div class="backup_details">
-                            <span class="backup_mesid">消息数: ${backup.lastMessageId + 1}</span>
+                            <span class="backup_mesid">最新楼: #${backup.lastMessageId}</span>
                             <span class="backup_date">${formattedDate}</span>
                         </div>
                         <div class="backup_preview" title="${backup.lastMessagePreview}">${backup.lastMessagePreview}...</div>
                     </div>
                     <div class="backup_actions">
+                        <button class="menu_button backup_preview_btn" title="预览此备份内容" data-timestamp="${backup.timestamp}" data-key="${backup.chatKey}">预览</button>
                         <button class="menu_button backup_restore" title="恢复此备份到新聊天" data-timestamp="${backup.timestamp}" data-key="${backup.chatKey}">恢复</button>
                         <button class="menu_button danger_button backup_delete" title="删除此备份" data-timestamp="${backup.timestamp}" data-key="${backup.chatKey}">删除</button>
                     </div>
@@ -868,6 +968,311 @@ async function updateBackupsList() {
         backupsContainer.html(`<div class="backup_empty_notice">加载备份列表失败: ${error.message}</div>`);
     }
 }
+
+function createPreviewModal(title, messages) {
+    // 创建遮罩层，阻止任何事件穿透到下面的元素
+    const modalOverlay = document.createElement('div');
+    modalOverlay.id = 'backup_preview_overlay';
+    modalOverlay.style.cssText = `
+        position: fixed;
+        top: 0;
+        left: 0;
+        width: 100vw;
+        height: 100vh;
+        background-color: rgba(0, 0, 0, 0.85);
+        z-index: 99999;
+        display: flex;
+        justify-content: center;
+        align-items: center;
+        pointer-events: all;
+    `;
+    
+    // 准备消息内容HTML
+    const messagesHtml = messages.slice(-2).map(msg => {
+        let messageContent = msg.mes || '';
+        messageContent = messageContent.replace(/<think>[\s\S]*?<\/think>/gi, '');
+        messageContent = messageContent.replace(/<thinking>[\s\S]*?<\/thinking>/gi, '');
+        
+        return `
+            <div style="margin-bottom:15px; padding:10px; border-radius:8px; background-color:${msg.is_user ? 'rgba(0,120,255,0.15)' : 'rgba(128,0,128,0.15)'}; color:rgba(255,255,255,0.9);">
+                <div style="font-weight:bold; margin-bottom:5px;">${msg.name || (msg.is_user ? '用户' : '助手')}</div>
+                <div style="white-space:pre-wrap;">${messageContent}</div>
+            </div>
+        `;
+    }).join('');
+    
+    // 创建内容HTML
+    modalOverlay.innerHTML = `
+        <div style="background-color:#121212; border:1px solid #444; border-radius:10px; width:80%; max-width:800px; max-height:80vh; display:flex; flex-direction:column; box-shadow:0 5px 15px rgba(0,0,0,0.8); position:relative; overflow:hidden; pointer-events: auto;">
+            <div style="display:flex; justify-content:space-between; align-items:center; padding:10px 15px; border-bottom:1px solid #444; background-color:#000000;">
+                <h3 style="margin:0; color:#fff;">${title}</h3>
+                <span id="backup_preview_close" style="cursor:pointer; font-size:1.5em; color:#fff;">&times;</span>
+            </div>
+            <div style="padding:15px; overflow-y:auto; max-height:calc(80vh - 50px); color:#ddd;">
+                <div style="text-align:center; color:rgba(255,255,255,0.6); margin-bottom:15px; font-style:italic;">
+                    共 ${messages.length} 条消息，仅显示最后 2 条
+                </div>
+                ${messages.length > 2 ? '<div style="margin:20px 0; height:2px; background-color:rgba(255,255,255,0.2); position:relative;"><div style="position:absolute; top:-10px; left:50%; transform:translateX(-50%); background-color:#121212; padding:0 10px; color:rgba(255,255,255,0.6);">...</div></div>' : ''}
+                ${messagesHtml}
+            </div>
+        </div>
+    `;
+    
+    // 先移除可能已存在的遮罩
+    const existingOverlay = document.getElementById('backup_preview_overlay');
+    if (existingOverlay) {
+        document.body.removeChild(existingOverlay);
+    }
+    
+    // 将遮罩添加到文档
+    document.body.appendChild(modalOverlay);
+    
+    // 添加关闭事件 - 用原生JavaScript而不是jQuery
+    document.getElementById('backup_preview_close').addEventListener('click', function(e) {
+        e.preventDefault();
+        e.stopPropagation();
+        document.body.removeChild(modalOverlay);
+    });
+    
+    // 点击背景关闭
+    modalOverlay.addEventListener('click', function(e) {
+        if (e.target === modalOverlay) {
+            e.preventDefault();
+            e.stopPropagation();
+            document.body.removeChild(modalOverlay);
+        }
+    });
+    
+    return modalOverlay;
+}
+
+async function previewBackup(chatKey, timestamp) {
+    try {
+        logDebug(`预览备份, chatKey: ${chatKey}, timestamp: ${timestamp}`);
+        const db = await getDB();
+        
+        // 获取备份数据
+        const backup = await new Promise((resolve, reject) => {
+            const transaction = db.transaction([STORE_NAME], 'readonly');
+            transaction.onerror = (event) => reject(event.target.error);
+            
+            const store = transaction.objectStore(STORE_NAME);
+            const request = store.get([chatKey, timestamp]);
+            
+            request.onsuccess = () => resolve(request.result);
+            request.onerror = (event) => reject(event.target.error);
+        });
+        
+        if (!backup || !backup.chat || !Array.isArray(backup.chat)) {
+            toastr.error('无法加载备份内容或备份格式无效');
+            return;
+        }
+        
+        // 创建预览容器 (直接添加到body)
+        const previewContainer = document.createElement('div');
+        previewContainer.id = 'backup_preview_container';
+        previewContainer.style.cssText = `
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100vw;
+            height: 100vh;
+            background-color: rgba(0, 0, 0, 0.85);
+            z-index: 99999;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+        `;
+        
+        // 创建内容容器
+        const contentBox = document.createElement('div');
+        contentBox.style.cssText = `
+            background-color: #121212;
+            border: 1px solid #444;
+            border-radius: 10px;
+            width: 80%;
+            max-width: 800px;
+            max-height: 80vh;
+            display: flex;
+            flex-direction: column;
+            box-shadow: 0 5px 15px rgba(0, 0, 0, 0.8);
+            overflow: hidden;
+        `;
+        
+        // 创建头部
+        const header = document.createElement('div');
+        header.style.cssText = `
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 10px 15px;
+            border-bottom: 1px solid #444;
+            background-color: #000000;
+        `;
+        
+        const title = document.createElement('h3');
+        title.style.cssText = `margin: 0; color: #fff;`;
+        title.textContent = `${backup.entityName} - ${backup.chatName}`;
+        
+        const closeBtn = document.createElement('span');
+        closeBtn.style.cssText = `cursor: pointer; font-size: 1.5em; color: #fff;`;
+        closeBtn.textContent = '×';
+        closeBtn.onclick = function(e) {
+            e.preventDefault();
+            e.stopPropagation();
+            document.body.removeChild(previewContainer);
+        };
+        
+        header.appendChild(title);
+        header.appendChild(closeBtn);
+        
+        // 创建消息容器
+        const msgContainer = document.createElement('div');
+        msgContainer.style.cssText = `
+            padding: 15px;
+            overflow-y: auto;
+            max-height: calc(80vh - 50px);
+            color: #ddd;
+        `;
+        
+        // 添加消息数量信息
+        const infoDiv = document.createElement('div');
+        infoDiv.style.cssText = `
+            text-align: center;
+            color: rgba(255, 255, 255, 0.6);
+            margin-bottom: 15px;
+            font-style: italic;
+        `;
+        infoDiv.textContent = `共 ${backup.chat.length} 条消息，仅显示最后 2 条`;
+        msgContainer.appendChild(infoDiv);
+        
+        // 添加分隔线
+        if (backup.chat.length > 2) {
+            const divider = document.createElement('div');
+            divider.style.cssText = `
+                margin: 20px 0;
+                height: 2px;
+                background-color: rgba(255, 255, 255, 0.2);
+                position: relative;
+            `;
+            
+            const dividerText = document.createElement('div');
+            dividerText.style.cssText = `
+                position: absolute;
+                top: -10px;
+                left: 50%;
+                transform: translateX(-50%);
+                background-color: #121212;
+                padding: 0 10px;
+                color: rgba(255, 255, 255, 0.6);
+            `;
+            dividerText.textContent = '...';
+            
+            divider.appendChild(dividerText);
+            msgContainer.appendChild(divider);
+        }
+        
+        // 获取最后两条消息
+        const lastMessages = backup.chat.slice(-2);
+        
+        // 尝试获取SillyTavern中的Markdown渲染函数
+        let markdownRenderer = null;
+        
+        // 检查各种可能的Markdown渲染函数
+        if (typeof window.renderMarkdown === 'function') {
+            markdownRenderer = window.renderMarkdown;
+        } else if (typeof window.backendMarkdownToHtml === 'function') {
+            markdownRenderer = window.backendMarkdownToHtml;
+        } else if (typeof window.markdown_converter !== 'undefined' && 
+                  window.markdown_converter && 
+                  typeof window.markdown_converter.makeHtml === 'function') {
+            markdownRenderer = text => window.markdown_converter.makeHtml(text);
+        }
+        
+        // 渲染消息
+        lastMessages.forEach(msg => {
+            // 过滤掉<think>和<thinking>标签内容
+            let messageContent = msg.mes || '';
+            messageContent = messageContent.replace(/<think>[\s\S]*?<\/think>/gi, '');
+            messageContent = messageContent.replace(/<thinking>[\s\S]*?<\/thinking>/gi, '');
+            
+            const messageDiv = document.createElement('div');
+            messageDiv.style.cssText = `
+                margin-bottom: 15px;
+                padding: 10px;
+                border-radius: 8px;
+                background-color: ${msg.is_user ? 'rgba(0, 120, 255, 0.15)' : 'rgba(128, 0, 128, 0.15)'};
+                color: rgba(255, 255, 255, 0.9);
+            `;
+            
+            const nameDiv = document.createElement('div');
+            nameDiv.style.cssText = `font-weight: bold; margin-bottom: 5px;`;
+            nameDiv.textContent = msg.name || (msg.is_user ? '用户' : '助手');
+            
+            const contentDiv = document.createElement('div');
+            contentDiv.style.cssText = `white-space: pre-wrap;`;
+            
+            // 使用Markdown渲染或简单格式化
+            if (markdownRenderer) {
+                contentDiv.innerHTML = markdownRenderer(messageContent);
+            } else {
+                // 简单格式化：处理换行符和基本Markdown
+                messageContent = messageContent
+                    .replace(/\n/g, '<br>')                         // 换行
+                    .replace(/\*\*(.*?)\*\*/g, '<b>$1</b>')         // 粗体
+                    .replace(/\*(.*?)\*/g, '<i>$1</i>')             // 斜体
+                    .replace(/`(.*?)`/g, '<code>$1</code>')         // 行内代码
+                    .replace(/```([\s\S]*?)```/g, '<pre><code>$1</code></pre>'); // 代码块
+                
+                contentDiv.innerHTML = messageContent;
+            }
+            
+            messageDiv.appendChild(nameDiv);
+            messageDiv.appendChild(contentDiv);
+            msgContainer.appendChild(messageDiv);
+        });
+        
+        // 组装UI
+        contentBox.appendChild(header);
+        contentBox.appendChild(msgContainer);
+        previewContainer.appendChild(contentBox);
+        
+        // 阻止事件冒泡
+        contentBox.onclick = function(e) {
+            e.stopPropagation();
+        };
+        
+        // 添加关闭事件
+        previewContainer.onclick = function(e) {
+            if (e.target === previewContainer) {
+                e.preventDefault();
+                e.stopPropagation();
+                document.body.removeChild(previewContainer);
+            }
+        };
+        
+        // 先移除可能已存在的预览窗口
+        const existingPreview = document.getElementById('backup_preview_container');
+        if (existingPreview) {
+            document.body.removeChild(existingPreview);
+        }
+        
+        // 添加到document.body
+        document.body.appendChild(previewContainer);
+        
+    } catch (error) {
+        console.error('[聊天自动备份] 预览备份失败:', error);
+        toastr.error(`预览失败: ${error.message}`);
+    }
+}
+
+// 在事件绑定部分添加预览按钮的点击事件处理
+$(document).on('click', '.backup_preview_btn', function() {
+    const button = $(this);
+    const timestamp = parseInt(button.data('timestamp'));
+    const chatKey = button.data('key');
+    previewBackup(chatKey, timestamp);
+});
 
 // --- 初始化与事件绑定 ---
 jQuery(async () => {
@@ -1034,7 +1439,7 @@ jQuery(async () => {
                 });
 
                 if (backup) {
-                    if (confirm(`确定要恢复 “${backup.entityName} - ${backup.chatName}” 的备份吗？\n\n这将选中对应的角色/群组，来恢复备份聊天记录。`)) {
+                    if (confirm(`确定要恢复 “${backup.entityName} - ${backup.chatName}” 的备份吗？\n\n这将选中对应的角色/群组，并创建一个【新的聊天】来恢复备份内容。\n\n当前聊天内容不会丢失，但请确保已保存。`)) {
                         const success = await restoreBackup(backup);
                         if (success) {
                             toastr.success('聊天记录已成功恢复到新聊天');
