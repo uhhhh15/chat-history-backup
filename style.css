@@ -134,7 +134,7 @@
 
 /* 复选框样式 */
 .checkbox_label {
-    display: inline-flex;
+    display: flex;
     align-items: center;
     cursor: pointer;
 }
