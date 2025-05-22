@@ -3,12 +3,7 @@
         <b>聊天记录快速恢复</b>
         <div class="inline-drawer-icon fa-solid fa-circle-chevron-down down"></div>
     </div>
-    <div class="inline-drawer-content">
-        <div class="chat_backup_description">
-            <p>此插件会自动保存最近三次（默认）的聊天记录，确保重要对话丢失后快速恢复。</p>
-            <p>点击恢复按钮即可恢复备份的聊天记录。</p>
-        </div>
-        
+    <div class="inline-drawer-content">     
         <div class="chat_backup_controls">
             <div class="chat_backup_control_item">
                 <label class="checkbox_label">
@@ -16,19 +11,12 @@
                     <span>启用详细日志</span>
                 </label>
             </div>
-            <div class="chat_backup_control_item">
-                <button id="chat_backup_manual_backup" class="menu_button">立即备份当前聊天</button>
-            </div>
         </div>
         
-        <div class="backup_list_container">
-            <div class="backup_list_header">
-                <h3>已保存的备份</h3>
-            </div>
-            <div id="chat_backup_list" class="backup_list">
-                <!-- 备份列表将通过JS动态添加 -->
-                <div class="backup_empty_notice">加载中...</div>
-            </div>
+        <h3>已保存的备份</h3>
+        <div id="chat_backup_list" class="backup_list">
+            <!-- 备份列表将通过JS动态添加 -->
+            <div class="backup_empty_notice">加载中...</div>
         </div>
     </div>
 </div>
