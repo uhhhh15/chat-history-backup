@@ -1,18 +1,45 @@
 /* 聊天自动备份插件样式 */
 
-/* 确保备份操作区域内的所有按钮文本都不换行 */
-.backup_actions .menu_button { /* 应用到恢复和删除按钮 */
+/* ===== 控制区域 ===== */
+.chat_backup_controls {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 10px;
+    margin: 15px 0;
+    padding: 10px;
+    background-color: rgba(0, 0, 0, 0.1);
+    border-radius: 10px;
+}
+
+.chat_backup_control_item {
+    margin: 5px;
+}
+
+/* 确保控制区域内的所有按钮文本都不换行 */
+.chat_backup_controls button,
+.backup_actions .menu_button {
     white-space: nowrap;
 }
 
-/* 假设手动备份按钮的 ID 是 #chat_backup_manual_backup */
-/* 或者，如果它也在 .chat_backup_controls 容器内，可以更通用地选择 */
-.chat_backup_controls button { /* 应用到控制区域内的所有按钮 */
-    white-space: nowrap;
+.chat_backup_description {
+    margin-bottom: 15px;
+    opacity: 0.8;
+    font-size: 0.95em;
+    line-height: 1.5;
 }
 
+/* 复选框样式 */
+.checkbox_label {
+    display: flex;
+    align-items: center;
+    cursor: pointer;
+}
 
-/* 备份列表容器 */
+.checkbox_label input[type="checkbox"] {
+    margin-right: 5px;
+}
+
+/* ===== 备份列表容器 ===== */
 .backup_list_container {
     margin-top: 15px;
     border: 1px solid var(--border-color);
@@ -36,30 +63,24 @@
     padding: 10px;
 }
 
-/* 控制区域 */
-.chat_backup_controls {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 10px;
-    margin: 15px 0;
-    padding: 10px;
-    background-color: rgba(0, 0, 0, 0.1);
-    border-radius: 10px;
+/* 空列表提示 */
+.backup_empty_notice {
+    text-align: center;
+    padding: 30px;
+    color: #888;
+    opacity: 0.6;
+    font-style: italic;
 }
 
-.chat_backup_control_item {
-    margin: 5px;
-}
-
-/* 单个备份项目 */
+/* ===== 单个备份项目 ===== */
 .backup_item {
     display: flex;
     justify-content: space-between;
-    align-items: center;
+    align-items: flex-start;
     padding: 12px;
-    margin-bottom: 10px;
-    background-color: rgba(0, 0, 0, 0.15);
-    border: 1px solid var(--border-color);
+    margin-bottom: 12px;
+    background-color: rgba(0, 0, 0, 0.2);
+    border: 1px solid rgba(255, 255, 255, 0.1);
     border-radius: 8px;
     transition: background-color 0.2s;
 }
@@ -71,6 +92,16 @@
 .backup_info {
     flex: 1;
     overflow: hidden;
+}
+
+/* 角色/群组名称 - 突出显示 */
+.backup_entity_header {
+    font-size: 1.2em;
+    font-weight: bold;
+    margin-bottom: 5px;
+    color: #ff9800;
+    border-bottom: 1px solid rgba(255, 152, 0, 0.3);
+    padding-bottom: 3px;
 }
 
 .backup_header {
@@ -85,8 +116,17 @@
     color: var(--SmColor);
 }
 
+/* 聊天名称样式 */
 .backup_chat {
-    color: var(--infoCardText);
+    font-style: italic;
+    color: #aaa;
+}
+
+/* 详细信息样式 */
+.backup_details {
+    font-size: 0.85em;
+    margin-top: 5px;
+    color: #ccc;
 }
 
 .backup_mesid, .backup_date {
@@ -94,56 +134,30 @@
     opacity: 0.85;
 }
 
+/* 预览内容样式 */
 .backup_preview {
+    margin-top: 8px;
+    padding-top: 5px;
+    border-top: 1px dotted rgba(255, 255, 255, 0.1);
+    font-size: 0.9em;
+    color: #ddd;
     font-style: italic;
-    opacity: 0.7;
-    overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
     max-width: 100%;
+    overflow: hidden;
+    word-break: break-word;  /* 添加这一行确保长文本不会溢出 */
 }
 
+/* 按钮区域样式 */
 .backup_actions {
     margin-left: 10px;
     display: flex;
-    flex-direction: column;
+    flex-direction: column;  
     gap: 5px;
 }
 
-.backup_actions .menu_button {
-    margin-bottom: 5px;
-}
-
-.backup_restore {
-    white-space: nowrap;
-}
-
-.backup_empty_notice {
-    text-align: center;
-    padding: 30px;
-    opacity: 0.6;
-    font-style: italic;
-}
-
-.chat_backup_description {
-    margin-bottom: 15px;
-    opacity: 0.8;
-    font-size: 0.95em;
-    line-height: 1.5;
-}
-
-/* 复选框样式 */
-.checkbox_label {
-    display: flex;
-    align-items: center;
-    cursor: pointer;
-}
-
-.checkbox_label input[type="checkbox"] {
-    margin-right: 5px;
-}
-
-/* 预览消息样式 */
+/* ===== 预览消息样式 ===== */
 .backup_preview_content {
     max-height: 400px;
     overflow-y: auto;
