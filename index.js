@@ -769,7 +769,7 @@ async function executeBackupLogic_Core(settings, backupType = BACKUP_TYPE.STANDA
             
             if (!isSynced) {
                 logDebug(`[Backup #${attemptId.toString().slice(-6)}] NOT synced after ${MAX_POLL_ATTEMPTS} attempts. Using last API data.`);
-                toastr.warning(`备份警告: 数据同步不完美，备份可能略旧`, '聊天自动备份', {timeOut: 7000});
+                // toastr.warning(`备份警告: 数据同步不完美，备份可能略旧`, '聊天自动备份', {timeOut: 7000});
             }
             
             fullChatContentArray = serverChatContentArray;
