@@ -28,6 +28,7 @@ import {
     getThumbnailUrl,        // 可能需要获取头像URL
     getRequestHeaders,      // 用于API请求的头部
     openCharacterChat,      // 用于打开角色聊天
+    getPastCharacterChats,  // 获取角色的聊天列表
 } from '../../../../script.js';
 
 import {
@@ -38,6 +39,10 @@ import {
 import { POPUP_TYPE, 
 Popup,
 } from '../../../popup.js';
+
+import {
+    waitUntilCondition,   // 轮询等待条件满足
+} from '../../../utils.js';
 
 // --- 备份类型枚举 ---
 const BACKUP_TYPE = {
@@ -57,6 +62,10 @@ let tableDrawerElement = null; // 添加全局变量声明，用于保存抽屉�
 // 在文件顶部添加一个新的标志变量
 let messageSentRecently = false;
 let messageSentResetTimer = null;
+
+// 全局请求超时常量 & 抽屉监听器实例
+const FETCH_TIMEOUT_MS = 10000; // 毫秒
+let drawerObserverInstance = null;
 
 // 优化的高效哈希函数 - 专为比较优化，非加密用途
 function fastHash(str) {
@@ -176,25 +185,32 @@ const drawerObserverCallback = async function(mutationsList, observer) {
  */
 async function fetchCharacterChatContent(characterName, chatFileName, avatarFileName) {
     logDebug(`[API] 正在获取角色 "${characterName}" 的聊天文件 "${chatFileName}.jsonl" 内容...`);
+    // 新增：AbortController 超时中断
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
     try {
         const response = await fetch('/api/chats/get', {
             method: 'POST',
             headers: getRequestHeaders(),
-            body: JSON.stringify({
-                ch_name: characterName,
-                file_name: chatFileName,
-                avatar_url: avatarFileName,
-            }),
+            body: JSON.stringify({ ch_name: characterName, file_name: chatFileName, avatar_url: avatarFileName }),
+            signal: controller.signal,
         });
+        clearTimeout(timeoutId);
         if (!response.ok) {
             const errorText = await response.text();
             throw new Error(`获取角色聊天内容API失败: ${response.status} - ${errorText}`);
         }
-        const chatContentArray = await response.json(); // 应该返回 [metadata, ...messages]
+        const chatContentArray = await response.json();
         logDebug(`[API] 成功获取角色 "${characterName}" 的聊天文件内容，总条目数: ${chatContentArray.length}`);
         return chatContentArray;
     } catch (error) {
-        console.error(`[API] fetchCharacterChatContent 错误:`, error);
+        clearTimeout(timeoutId);
+        if (error.name === 'AbortError') {
+            console.error('[API] fetchCharacterChatContent 请求超时:', error);
+            toastr.error('请求超时：获取角色聊天内容失败', '恢复失败');
+        } else {
+            console.error(`[API] fetchCharacterChatContent 错误:`, error);
+        }
         return null;
     }
 }
@@ -208,15 +224,17 @@ async function fetchCharacterChatContent(characterName, chatFileName, avatarFile
  */
 async function fetchGroupChatMessages(groupId, groupChatId) {
     logDebug(`[API] 正在获取群组 "${groupId}" 的聊天 "${groupChatId}.jsonl" 消息内容...`);
+    // 新增：AbortController 超时中断
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
     try {
         const response = await fetch('/api/chats/group/get', {
             method: 'POST',
             headers: getRequestHeaders(),
-            body: JSON.stringify({
-                id: groupId, 
-                chat_id: groupChatId
-            }),
+            body: JSON.stringify({ id: groupId, chat_id: groupChatId }),
+            signal: controller.signal,
         });
+        clearTimeout(timeoutId);
         if (!response.ok) {
             const errorText = await response.text();
             throw new Error(`获取群组聊天消息API失败: ${response.status} - ${errorText}`);
@@ -225,7 +243,13 @@ async function fetchGroupChatMessages(groupId, groupChatId) {
         logDebug(`[API] 成功获取群组 "${groupId}" 的聊天 "${groupChatId}.jsonl" 消息，消息数: ${messagesArray.length}`);
         return messagesArray;
     } catch (error) {
-        console.error(`[API] fetchGroupChatMessages 错误:`, error);
+        clearTimeout(timeoutId);
+        if (error.name === 'AbortError') {
+            console.error('[API] fetchGroupChatMessages 请求超时:', error);
+            toastr.error('请求超时：获取群组聊天消息失败', '恢复失败');
+        } else {
+            console.error(`[API] fetchGroupChatMessages 错误:`, error);
+        }
         return null;
     }
 }
@@ -255,6 +279,8 @@ const DEFAULT_SETTINGS = {
     maxBackupsPerEntity: 1,   // 每个角色/群组最多保存几个备份 (新增)
     backupDebounceDelay: 1500, // 防抖延迟时间 (毫秒)
     debug: false, // 调试模式
+    restoreChatTimeout: 3000,    // 等待聊天文件识别的超时(ms)
+    restoreContextTimeout: 3000, // 等待上下文切换的超时(ms)
 };
 
 // IndexedDB 数据库名称和版本
@@ -315,6 +341,8 @@ function initSettings() {
     settings.maxBackupsPerEntity = settings.maxBackupsPerEntity ?? DEFAULT_SETTINGS.maxBackupsPerEntity;
     settings.backupDebounceDelay = settings.backupDebounceDelay ?? DEFAULT_SETTINGS.backupDebounceDelay;
     settings.debug = settings.debug ?? DEFAULT_SETTINGS.debug;
+    settings.restoreChatTimeout = settings.restoreChatTimeout ?? DEFAULT_SETTINGS.restoreChatTimeout;
+    settings.restoreContextTimeout = settings.restoreContextTimeout ?? DEFAULT_SETTINGS.restoreContextTimeout;
 
     // 验证设置合理性
     if (typeof settings.maxEntityCount !== 'number' || settings.maxEntityCount < 1 || settings.maxEntityCount > 10) {
@@ -1124,99 +1152,127 @@ async function performManualBackup() {
     }
 }
 
-// --- Restore logic ---
-async function restoreBackup(backupData) {
-    logDebug('[聊天自动备份] 开始通过导入API恢复备份:', { chatKey: backupData.chatKey, timestamp: backupData.timestamp });
-    logDebug('[聊天自动备份] 原始备份数据:', JSON.parse(JSON.stringify(backupData)));
+// --- 恢复逻辑 (重构版) ---
 
-    // 验证备份数据完整性
+/**
+ * [新增辅助函数] 等待，直到指定的聊天文件出现在角色的聊天列表中。
+ * @param {number} charId 角色索引
+ * @param {string} chatFileNameToFind 要查找的聊天文件名 (不含.jsonl)
+ * @param {number} timeout 超时时间 (毫秒)
+ * @returns {Promise<void>}
+ */
+async function waitForChatFile(charId, chatFileNameToFind, timeout = null) {
+    const t = timeout ?? extension_settings[PLUGIN_NAME].restoreChatTimeout;
+    logDebug(`[恢复流程] 等待聊天文件 "${chatFileNameToFind}" 被识别 (超时 ${t}ms)…`);
+    await waitUntilCondition(
+        async () => {
+            const chats = await getPastCharacterChats(charId);
+            return chats.some(c => c.file_name.replace('.jsonl','') === chatFileNameToFind);
+        },
+        t,
+        200
+    ).catch(err => {
+        const uiMsg = `等待超时：未检测到聊天文件 "${chatFileNameToFind}" 被识别`;
+        // 2) 超时时给出手动切换提示
+        toastr.error(`${uiMsg}。请手动切换到该角色的任意聊天后，再尝试恢复。`, '恢复失败');
+        throw new Error(uiMsg);
+    });
+    logDebug(`[恢复流程] 聊天文件 "${chatFileNameToFind}" 已确认存在。`);
+}
+
+/**
+ * [新增辅助函数] 等待，直到SillyTavern的上下文（Context）更新为指定状态。
+ * @param {object} expectedState - 期望的上下文状态，例如 { characterId: '123', chatId: 'new_chat' }
+ * @param {number} timeout - 超时时间 (毫秒)
+ * @returns {Promise<void>}
+ */
+async function waitForContextChange(expectedState, timeout = null) {
+    const t = timeout ?? extension_settings[PLUGIN_NAME].restoreContextTimeout;
+    const desc = Object.entries(expectedState).map(([k,v])=>`${k}=${v}`).join(',');
+    logDebug(`[恢复流程] 等待上下文更新至 (${desc}) (超时 ${t}ms)…`);
+    await waitUntilCondition(
+        () => {
+            const ctx = getContext();
+            return Object.entries(expectedState).every(([k,v])=>String(ctx[k])===String(v));
+        },
+        t,
+        100
+    ).catch(err => {
+        const uiMsg = `等待超时：未检测到上下文更新至 (${desc})`;
+        toastr.error(`${uiMsg}。请手动切换到目标角色并打开任意聊天后，再尝试恢复。`, '恢复失败');
+        throw new Error(uiMsg);
+    });
+    logDebug(`[恢复流程] 上下文已成功更新至 (${desc})。`);
+}
+
+
+async function restoreBackup(backupData) {
+    logDebug('[恢复流程] 开始通过导入API恢复备份:', { chatKey: backupData.chatKey, timestamp: backupData.timestamp });
+    logDebug('[恢复流程] 原始备份数据:', JSON.parse(JSON.stringify(backupData)));
+
     if (!backupData.chatFileContent || !Array.isArray(backupData.chatFileContent) || backupData.chatFileContent.length === 0) {
         toastr.error('备份数据无效：缺少或空的 chatFileContent。', '恢复失败');
-        console.error('[聊天自动备份] 备份数据无效，无法恢复。');
         return false;
     }
 
-    // 从 backupData 中获取 entityName 和 chatName
     const originalEntityName = backupData.entityName || '未知实体';
     const originalChatName = backupData.chatName || '未知聊天';
 
-    // 提取原始实体ID
     const isGroupBackup = backupData.chatKey.startsWith('group_');
     let originalEntityId = null;
     
     if (isGroupBackup) {
-        // 从 group_GROUPID_chatid 格式中提取 GROUPID
         const match = backupData.chatKey.match(/^group_([^_]+)_/);
         originalEntityId = match ? match[1] : null;
-        logDebug(`[聊天自动备份] 从备份 chatKey 中提取的原始群组ID: ${originalEntityId}`);
     } else {
-        // 从 char_CHARINDEX_chatid 格式中提取 CHARINDEX
         const match = backupData.chatKey.match(/^char_(\d+)_/);
         originalEntityId = match ? match[1] : null;
-        logDebug(`[聊天自动备份] 从备份 chatKey 中提取的原始角色索引: ${originalEntityId}`);
     }
 
     if (!originalEntityId) {
         toastr.error('无法从备份数据中解析原始实体ID。', '恢复失败');
-        console.error('[聊天自动备份] 无法解析原始实体ID，chatKey:', backupData.chatKey);
         return false;
     }
 
-    // 从 chatFileContent 中分离元数据和消息
     const retrievedChatMetadata = structuredClone(backupData.chatFileContent[0]);
     const retrievedChat = structuredClone(backupData.chatFileContent.slice(1));
 
     if (typeof retrievedChatMetadata !== 'object' || !Array.isArray(retrievedChat)) {
         toastr.error('备份数据格式错误：无法分离元数据和消息。', '恢复失败');
-        console.error('[聊天自动备份] 备份数据 chatFileContent 格式错误。');
         return false;
     }
-    logDebug(`[聊天自动备份] 从备份中提取元数据 (keys: ${Object.keys(retrievedChatMetadata).length}) 和消息 (count: ${retrievedChat.length})`);
+    logDebug(`[恢复流程] 从备份中提取元数据 (keys: ${Object.keys(retrievedChatMetadata).length}) 和消息 (count: ${retrievedChat.length})`);
 
-    // 注意: 移除多余的确认对话框，因为确认已在外部UI事件处理中完成
-
-    // --- 2. 构建 .jsonl File 对象 ---
-    logDebug('[聊天自动备份] 步骤2: 构建 .jsonl File 对象...');
     const jsonlString = constructJsonlString(retrievedChatMetadata, retrievedChat);
     if (!jsonlString) {
         toastr.error('无法构建 .jsonl 数据，恢复中止。', '恢复失败');
         return false;
     }
 
-    const timestampSuffix = new Date(backupData.timestamp).toISOString().replace(/[:.]/g, '-');
-    // 使用原始聊天名和备份时间戳来命名恢复的文件，增加可识别性
-    const restoredInternalFilename = `${originalChatName}_restored_${timestampSuffix}.jsonl`;
+	const restoredInternalFilename = `${originalChatName}.jsonl`;
     const chatFileObject = new File([jsonlString], restoredInternalFilename, { type: "application/json-lines" });
-    logDebug(`[聊天自动备份] 已创建 File 对象: ${chatFileObject.name}, 大小: ${chatFileObject.size} bytes`);
+    logDebug(`[恢复流程] 已创建 File 对象: ${chatFileObject.name}, 大小: ${chatFileObject.size} bytes`);
 
-    // --- 3. 获取当前上下文以确定导入目标 ---
-    const currentContext = getContext();
-    const formData = new FormData();
-    formData.append('file', chatFileObject);
-    formData.append('file_type', 'jsonl');
-
-    let importUrl = '';
     let success = false;
-
-    logDebug('[聊天自动备份] 步骤3: 准备调用导入API...');
 
     try {
         if (isGroupBackup) { // 恢复到原始群组
-            const targetGroupId = originalEntityId; // 使用从备份中提取的原始群组ID
-            const targetGroup = context.groups?.find(g => g.id === targetGroupId);
+            const targetGroupId = originalEntityId;
+            const targetGroup = getContext().groups?.find(g => g.id === targetGroupId);
             
             if (!targetGroup) {
-                toastr.error(`原始群组 (ID: ${targetGroupId}) 不存在，无法恢复。请确保该群组已经被加载或创建。`, '恢复失败');
-                logDebug(`[聊天自动备份] 找不到原始群组 ${targetGroupId}，恢复失败。可用的群组IDs: ${context.groups?.map(g => g.id).join(', ') || '无'}`);
-            return false;
-        }
+                toastr.error(`原始群组 (ID: ${targetGroupId}) 不存在，无法恢复。`, '恢复失败');
+                return false;
+            }
             
-            logDebug(`[聊天自动备份] 准备将备份导入到原始群组: ${targetGroup.name} (ID: ${targetGroupId})`);
+            logDebug(`[恢复流程] 准备将备份导入到原始群组: ${targetGroup.name} (ID: ${targetGroupId})`);
+            
+            const formData = new FormData();
+            formData.append('file', chatFileObject);
+            formData.append('file_type', 'jsonl');
+            formData.append('group_id', targetGroupId);
 
-            importUrl = '/api/chats/group/import';
-            formData.append('group_id', targetGroupId); // 使用原始群组ID
-
-            const response = await fetch(importUrl, {
+            const response = await fetch('/api/chats/group/import', {
                 method: 'POST',
                 headers: getRequestHeaders(),
                 body: formData,
@@ -1228,37 +1284,28 @@ async function restoreBackup(backupData) {
             }
             
             const importResult = await response.json();
-            logDebug(`[聊天自动备份] 群组聊天导入API响应:`, importResult);
-
-            if (importResult.res) { // importResult.res 是新创建的聊天ID
-                const newGroupChatId = importResult.res;
-                logDebug(`[聊天自动备份] 群组聊天导入成功，新聊天ID: ${newGroupChatId}。`);
-
-                // --- 新增：检查当前上下文是否需要切换到目标群组 ---
-                const currentContextBeforeOpenGroup = getContext();
-                if (String(currentContextBeforeOpenGroup.groupId) !== String(targetGroupId)) {
-                    logDebug(`[聊天自动备份] 当前群组 (ID: ${currentContextBeforeOpenGroup.groupId}) 与目标恢复群组 (ID: ${targetGroupId}) 不同，select_group_chats 将处理切换...`);
-                    // 在这种情况下 select_group_chats 将同时处理群组切换和聊天加载
-                } else {
-                    logDebug(`[聊天自动备份] 当前已在目标恢复群组 (ID: ${targetGroupId}) 上下文中，只需加载新聊天。`);
-                    // 即使在同一群组中，select_group_chats 也应该正确处理只切换聊天而不重新加载整个群组的情况
-                }
-                // --- 检查逻辑结束 ---
-
-                logDebug(`[聊天自动备份] 正在加载新导入的群组聊天: ${newGroupChatId} 到群组 ${targetGroupId}...`);
-                await select_group_chats(targetGroupId, newGroupChatId); // 加载新导入的聊天
-                
-                toastr.success(`备份已作为新聊天 "${newGroupChatId}" 导入到群组 "${targetGroup.name}"！`);
-                success = true;
-        } else {
+            if (!importResult.res) {
                 throw new Error('群组聊天导入API未返回有效的聊天ID。');
             }
-        } else if (!isGroupBackup) { // 恢复到原始角色
+
+            const newGroupChatId = importResult.res;
+            logDebug(`[恢复流程] 群组聊天导入成功，新聊天ID: ${newGroupChatId}。`);
+
+            logDebug(`[恢复流程] 正在加载新导入的群组聊天: ${newGroupChatId} 到群组 ${targetGroupId}...`);
+            await select_group_chats(targetGroupId, newGroupChatId);
+
+            // --- 新增：等待群组和聊天上下文确认加载 ---
+            await waitForContextChange({ groupId: targetGroupId, chatId: newGroupChatId });
+            logDebug(`[恢复流程] 群组和聊天上下文已确认加载。`);
+            
+            toastr.success(`备份已作为新聊天 "${newGroupChatId}" 导入到群组 "${targetGroup.name}"！`);
+            success = true;
+
+        } else { // 恢复到原始角色
             const targetCharacterIndex = parseInt(originalEntityId, 10);
             
             if (isNaN(targetCharacterIndex) || targetCharacterIndex < 0 || targetCharacterIndex >= characters.length) {
                 toastr.error(`备份中的原始角色索引 (${originalEntityId}) 无效或超出范围。`, '恢复失败');
-                logDebug(`[聊天自动备份] 原始角色索引 ${originalEntityId} 无效，characters数组长度: ${characters.length}`);
                 return false;
             }
             
@@ -1268,12 +1315,12 @@ async function restoreBackup(backupData) {
                 return false;
             }
             
-            logDebug(`[聊天自动备份] 准备将备份内容作为新聊天保存到原始角色: ${targetCharacter.name} (索引: ${targetCharacterIndex})`);
+            logDebug(`[恢复流程] 准备将备份内容作为新聊天保存到原始角色: ${targetCharacter.name} (索引: ${targetCharacterIndex})`);
 
-            // 对于角色，使用 /api/chats/save 来创建一个新的聊天文件
             const newChatIdForRole = chatFileObject.name.replace('.jsonl', '');
             const chatToSaveForRole = [retrievedChatMetadata, ...retrievedChat];
 
+            // 1. 保存新的聊天文件
             const saveResponse = await fetch('/api/chats/save', {
                 method: 'POST',
                 headers: getRequestHeaders(),
@@ -1282,7 +1329,7 @@ async function restoreBackup(backupData) {
                     file_name: newChatIdForRole,
                     chat: chatToSaveForRole,
                     avatar_url: targetCharacter.avatar,
-                    force: false // 保留false，避免意外覆盖，如有冲突将报错
+                    force: false
                 }),
             });
             
@@ -1291,46 +1338,47 @@ async function restoreBackup(backupData) {
                 throw new Error(`保存角色聊天API失败: ${saveResponse.status} - ${errorText}`);
             }
             
-            logDebug(`[聊天自动备份] 角色聊天内容已通过 /api/chats/save 保存为: ${newChatIdForRole}.jsonl`);
+            logDebug(`[恢复流程] 角色聊天内容已通过 /api/chats/save 保存为: ${newChatIdForRole}.jsonl`);
 
-            // --- 新增：检查当前上下文是否需要切换到目标角色 ---
+            // --- 新增: 等待聊天文件被服务器识别 ---
+            await waitForChatFile(targetCharacterIndex, newChatIdForRole);
+
+            // 2. 检查并切换角色 (如果需要)
             const currentContextBeforeOpen = getContext();
             if (String(currentContextBeforeOpen.characterId) !== String(targetCharacterIndex)) {
-                logDebug(`[聊天自动备份] 当前角色 (ID: ${currentContextBeforeOpen.characterId}) 与目标恢复角色 (索引: ${targetCharacterIndex}) 不同，执行切换...`);
+                logDebug(`[恢复流程] 当前角色 (ID: ${currentContextBeforeOpen.characterId}) 与目标 (索引: ${targetCharacterIndex}) 不同，执行切换...`);
                 await selectCharacterById(targetCharacterIndex);
-                // 在切换角色后，添加短暂延迟以确保SillyTavern的上下文和UI稳定
-                await new Promise(resolve => setTimeout(resolve, 300)); 
-                logDebug(`[聊天自动备份] 已切换到目标角色 (索引: ${targetCharacterIndex})`);
-            } else {
-                logDebug(`[聊天自动备份] 当前已在目标恢复角色 (索引: ${targetCharacterIndex}) 上下文中，无需切换角色。`);
-            }
-            // --- 检查和切换逻辑结束 ---
 
-            // 打开新保存的聊天文件 (此时应该已经在正确的角色上下文中了)
+                // --- 新增: 等待角色上下文更新 ---
+                await waitForContextChange({ characterId: targetCharacterIndex });
+                logDebug(`[恢复流程] 已切换到目标角色 (索引: ${targetCharacterIndex})`);
+            } else {
+                logDebug(`[恢复流程] 当前已在目标角色 (索引: ${targetCharacterIndex}) 上下文中，无需切换。`);
+            }
+
+            // 3. 打开新保存的聊天文件
+            logDebug(`[恢复流程] 正在打开新聊天: ${newChatIdForRole}`);
             await openCharacterChat(newChatIdForRole);
             
+            // --- 新增: 等待聊天被加载到上下文中 ---
+            await waitForContextChange({ chatId: newChatIdForRole });
+            logDebug(`[恢复流程] 聊天 "${newChatIdForRole}" 已确认加载。`);
+
             toastr.success(`备份已作为新聊天 "${newChatIdForRole}" 恢复到角色 "${targetCharacter.name}"！`);
             success = true;
-        } else {
-            toastr.error('未选择任何角色或群组，无法确定恢复目标。', '恢复失败');
-            return false;
         }
 
         if (success) {
-            logDebug('[聊天自动备份] 恢复流程成功完成。');
-            // 刷新备份列表
+            logDebug('[恢复流程] 恢复流程成功完成。');
             if (typeof updateBackupsList === 'function') {
                  await updateBackupsList(); 
             }
-            
-            // 不再在这里关闭扩展面板和备份UI，因为它已经在点击恢复按钮时关闭了
-            // closeExtensionsAndBackupUI();
         }
         return success;
 
     } catch (error) {
-        console.error(`[聊天自动备份] 通过导入API恢复备份时发生严重错误:`, error);
-        toastr.error(`恢复备份失败: ${error.message}`, '恢复失败');
+        console.error('[恢复流程] 恢复备份时发生严重错误:', error);
+        toastr.error(`恢复备份失败：${error.message}`, '恢复失败', { timeOut: 7000 });
         return false;
     }
 }
@@ -2207,28 +2255,18 @@ function findTableDrawerElement() {
 // 添加新的轮询函数来重试查找表格抽屉元素
 function setupTableDrawerObserver() {
     logDebug('[聊天自动备份] 开始设置表格抽屉监听器...');
-    
-    // 最大重试次数和间隔
-    const MAX_RETRIES = 10;
-    const RETRY_INTERVAL = 500; // 毫秒
+    const MAX_RETRIES = 10, RETRY_INTERVAL = 500;
     let retryCount = 0;
-    
-    function attemptToSetupObserver() {
-        logDebug(`[聊天自动备份] 尝试查找表格抽屉元素 (尝试 ${retryCount+1}/${MAX_RETRIES})...`);
-        
-        tableDrawerElement = findTableDrawerElement();
-        if (tableDrawerElement) {
-            // 找到元素，设置监听器
-            const drawerObserver = new MutationObserver(drawerObserverCallback);
-            const drawerObserverConfig = {
-                attributes: true,
-                attributeFilter: ['style'], // 只监听style属性变化，更高效
-            };
-            drawerObserver.observe(tableDrawerElement, drawerObserverConfig);
-            logDebug("[聊天自动备份] 已成功设置表格抽屉监听器");
 
+    function attemptToSetupObserver() {
+        // 将 observer 存为全局变量，便于 disconnect
+        drawerObserverInstance = new MutationObserver(drawerObserverCallback);
+        const element = findTableDrawerElement();
+        if (element) {
+            drawerObserverInstance.observe(element, { attributes: true, attributeFilter: ['style'] });
+            logDebug('[聊天自动备份] 已成功设置表格抽屉监听器');
             // 处理初始状态 (如果抽屉默认是打开的)
-            if (window.getComputedStyle(tableDrawerElement).display !== 'none') {
+            if (window.getComputedStyle(element).display !== 'none') {
                 logDebug('[聊天自动备份] 表格抽屉在插件初始化时已打开。获取初始 chatMetadata 哈希...');
                 const context = getContext();
                 if (context && context.chatMetadata) {
@@ -2260,8 +2298,6 @@ function setupTableDrawerObserver() {
             }
         }
     }
-    
-    // 开始首次尝试
     return attemptToSetupObserver();
 }
 
@@ -2476,6 +2512,7 @@ function showHelpPopup() {
             <li>插件会<strong>自动备份（默认）最近 3 条不同角色卡/群聊的聊天记录</strong>。</li>
             <li>每个角色卡/群聊的备份会<strong>实时更新</strong>为最新内容。</li>
             <li>若需增加备份角色卡/群聊数量，可在插件设置页面中进行调整。</li>
+			<li><strong>最大角色/群组数</strong>表示备份的角色卡/群聊数量，而<strong>每组最大备份数</strong>则表示每个角色卡/群聊保存的最新备份数量。</li>
             <li><strong>最多支持 10 个角色卡/群聊</strong>，每组最多备份 <strong>3 条记录</strong>。</li>
         </ul>
         <blockquote>
@@ -2483,16 +2520,28 @@ function showHelpPopup() {
         </blockquote>
         <hr>
         <h1>使用方式</h1>
+
+        <!-- 【新增】视频演示 -->
+        <video 
+            src="https://files.catbox.moe/xij4li.mp4" 
+            autoplay 
+            loop 
+            muted 
+            playsinline
+            style="width: 100%; max-width: 500px; border-radius: 8px; margin: 10px auto; display: block;">
+        </video>
+        <!-- 【新增结束】 -->
+
         <ul>
             <li>点击每条备份右侧的 <code>恢复</code> 按钮，即可<strong>一键恢复</strong>至对应角色卡/群聊。</li>
-            <li><strong>电脑用户</strong>可通过同时按下 <code>A + S + D</code> 键，<strong>可以直接快速恢复</strong>备份记录。</li>
+            <li><strong>电脑用户</strong>支持快捷键，键盘同时按下 <code>A  S  D</code> 三个键，<strong>可以直接快速恢复</strong>备份记录，无需打开备份页面。</li>
             <li>点击 <code>预览</code> 可查看该备份中的<strong>最后两条对话消息</strong>。</li>
             <li><code>删除</code> 按钮用于<strong>移除当前备份</strong>。</li>
         </ul>
         <hr>
         <h1>其他说明</h1>
         <p>插件备份的聊天记录与原记录<strong>完全一致</strong>，包括作者注释、记忆表格等内容。</p>
-        <p><strong>恢复操作通过酒馆的标准后端 API进行</strong>，确保数据完整且不会恢复失败。</p>
+        <p><strong>恢复操作通过酒馆的标准后端 API并使用轮询机制进行</strong>，确保数据完整且不会恢复失败。</p>
         <p>使用了 <strong>Web Worker 技术</strong>，确保插件运行不会影响酒馆的性能或流畅度（卡顿）。</p>
         <hr>
         <p class="footer-thanks" style="font-style: italic; margin-top: 20px;">如有其他问题、BUG 或建议，欢迎随时反馈！</p>
