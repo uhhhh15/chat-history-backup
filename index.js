@@ -925,7 +925,6 @@ async function executeBackupLogic_Core(settings, backupType = BACKUP_TYPE.STANDA
 
             } catch (error) {
                 console.error(`[Backup #${attemptId.toString().slice(-6)}] 分离式获取数据失败:`, error);
-                toastr.error(`备份失败: ${error.message || '获取数据出错'}`, '聊天自动备份');
                 return false;
             }
         }
@@ -1085,7 +1084,7 @@ async function performBackupConditional(backupType = BACKUP_TYPE.STANDARD, force
         return success;
     } catch (error) {
         console.error(`[Backup #${localAttemptId.toString().slice(-6)}] Conditional backup execution failed:`, error);
-        toastr.error(`Backup failed: ${error.message || 'Unknown error'}`, 'Chat Auto Backup');
+        toastr.error(`备份失败: ${error.message || 'Unknown error'}`, '聊天自动备份');
         return false;
     }
 }
@@ -2627,4 +2626,5 @@ function filterSpecialTags(text) {
         .replace(SPECIAL_TAGS_REGEX.htmlEscape.gt, "&gt;")
         .replace(SPECIAL_TAGS_REGEX.htmlEscape.quot, "&quot;")
         .replace(SPECIAL_TAGS_REGEX.htmlEscape.apos, "&#039;");
+
 }
