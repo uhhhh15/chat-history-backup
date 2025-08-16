@@ -893,38 +893,41 @@ async function executeBackupLogic_Core(settings, backupType = BACKUP_TYPE.STANDA
             originalChatMessagesCount = serverChatMessages.length;
 
         } else {
-            // 【策略二：常规备份-优化！】使用流式API仅获取元数据，并结合 getContext() 获取消息数组。
-            // 这种方式极大地减少了网络传输和客户端内存占用。
-            logDebug(`[Backup #${attemptId.toString().slice(-6)}] 使用常规备份策略，将分离元数据和消息获取。`);
-
+            // 【策略二：常规备份-优化！】-> 将其替换为与 forceSave=true 类似但更简洁的逻辑
+            logDebug(`[Backup #${attemptId.toString().slice(-6)}] 使用常规备份策略，将获取完整的聊天文件以确保一致性。`);
             try {
                 const context = getContext();
-                let serverMetadata = null;
-                const clientMessages = context.chat || [];
-
                 if (context.groupId) {
-                    // 群组的元数据主要存在于客户端的 context 中，直接使用即可。
-                    serverMetadata = structuredClone(context.chatMetadata || {});
-                    logDebug(`[Backup #${attemptId.toString().slice(-6)}] 群组聊天，直接从context获取元数据。`);
+                    // ... (此处省略，保持您原有的群组聊天获取逻辑)
+                    const group = context.groups?.find(g => g.id === context.groupId);
+                    const effectiveGroupChatId = group?.chat_id || context.chatId;
+                    if (!effectiveGroupChatId) throw new Error(`Group chat ID not found for group ${context.groupId}`);
+                    
+                    const messagesFromAPI = await fetchGroupChatMessages(group.id, effectiveGroupChatId);
+                    if (!messagesFromAPI) throw new Error("API for group messages returned null");
+                    
+                    // 2. 获取元数据 - 从当前加载的群组聊天中获取
+                    const serverChatMetadata = structuredClone(context.chatMetadata || {}); // 群组元数据更多依赖前端
+                    const serverChatMessages = messagesFromAPI;
+                    fullChatContentArray = [serverChatMetadata, ...serverChatMessages];
+                    originalChatMessagesCount = serverChatMessages.length;
                 } else if (context.characterId !== undefined) {
-                    // 角色聊天，使用我们新的流式API获取元数据。
                     const character = characters[context.characterId];
                     const effectiveCharChatFile = character?.chat || context.chatId;
                     if (!effectiveCharChatFile) throw new Error(`Character chat file not found for charId ${context.characterId}`);
                     
-                    serverMetadata = await fetchChatMetadataOnly(character.name, effectiveCharChatFile, character.avatar);
-                    if (!serverMetadata) throw new Error("流式API未能获取到角色元数据。");
-                } else {
-                    throw new Error("无法确定实体类型以获取元数据。");
-                }
-                
-                // 成功获取数据后，将它们组合成与之前逻辑兼容的格式
-                fullChatContentArray = [serverMetadata, ...clientMessages];
-                originalChatMessagesCount = clientMessages.length;
-                logDebug(`[Backup #${attemptId.toString().slice(-6)}] 成功组合服务器元数据 (${Object.keys(serverMetadata).length} keys) 和客户端消息 (${clientMessages.length} 条)。`);
+                    // 直接调用获取完整内容的函数，而不是只获取元数据
+                    const contentFromAPI = await fetchCharacterChatContent(character.name, effectiveCharChatFile, character.avatar);
+                    if (!contentFromAPI || contentFromAPI.length === 0) throw new Error("API for character chat returned null or empty");
 
+                    fullChatContentArray = contentFromAPI;
+                    originalChatMessagesCount = contentFromAPI.length - 1;
+                } else {
+                    throw new Error("无法确定实体类型以获取聊天内容。");
+                }
             } catch (error) {
-                console.error(`[Backup #${attemptId.toString().slice(-6)}] 分离式获取数据失败:`, error);
+                console.error(`[Backup #${attemptId.toString().slice(-6)}] 常规备份获取数据失败:`, error);
+                toastr.error(`备份失败: ${error.message || '获取数据出错'}`, '聊天自动备份');
                 return false;
             }
         }
