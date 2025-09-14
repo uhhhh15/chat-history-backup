@@ -359,7 +359,7 @@ function constructJsonlString(metadata, messages) {
 const PLUGIN_NAME = 'chat-history-backup';
 const DEFAULT_SETTINGS = {
     maxEntityCount: 5,        // 最多保存几个不同角色/群组的备份
-    maxBackupsPerEntity: 2,   // 每个角色/群组最多保存几个备份
+    maxBackupsPerEntity: 3,   // 每个角色/群组最多保存几个备份
     backupDebounceDelay: 1500, // 防抖延迟时间 (毫秒)
     debug: false, // 调试模式
     restoreChatTimeout: 3000,    // 等待聊天文件识别的超时(ms)
@@ -2661,4 +2661,5 @@ function filterSpecialTags(text) {
         .replace(SPECIAL_TAGS_REGEX.htmlEscape.apos, "&#039;");
 
 }
+
 
