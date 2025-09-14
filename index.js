@@ -380,6 +380,26 @@ let workerRequestId = 0;
 // 数据库连接池 - 实现单例模式
 let dbConnection = null;
 
+// 为所有 DB 操作加"失败重试（遇到 closing 则重开）"
+async function withDB(op, retries = 3) {
+    for (let i = 0; i <= retries; i++) {
+        const db = await getDB();
+        try {
+            return await op(db);
+        } catch (e) {
+            const msg = String(e?.message || '');
+            const isClosing = e?.name === 'InvalidStateError' || msg.includes('closing');
+            if (isClosing && i < retries) {
+                try { db.close?.(); } catch {}
+                dbConnection = null;
+                await new Promise(r => setTimeout(r, 50 * (i + 1))); // 线性小退避
+                continue;
+            }
+            throw e;
+        }
+    }
+}
+
 // --- 深拷贝逻辑 (将在Worker和主线程中使用) ---
 const deepCopyLogicString = `
     // Worker message handler - 优化版本，分离metadata和messages处理
@@ -460,6 +480,20 @@ function initDatabase() {
 
         request.onsuccess = function(event) {
             const db = event.target.result;
+            
+            // 当别的上下文要升级/删除本库时，老连接会收到 versionchange，务必尽快关闭并清空缓存
+            db.onversionchange = () => {
+                console.warn('[BackupDB] versionchange -> closing current connection');
+                try { db.close(); } catch {}
+                if (dbConnection === db) dbConnection = null;
+            };
+
+            // 有些浏览器实现了 onclose：收到就清空缓存，便于后续重开
+            db.onclose = () => {
+                console.warn('[BackupDB] onclose -> reset cached connection');
+                if (dbConnection === db) dbConnection = null;
+            };
+            
             logDebug('数据库打开成功');
             resolve(db);
         };
@@ -473,56 +507,48 @@ function initDatabase() {
                 console.log('[聊天自动备份] 创建了备份存储和索引');
             }
         };
+        
+        // 可选：被阻塞时给出日志，便于排查
+        request.onblocked = () => {
+            console.warn('[BackupDB] open request is blocked by another connection holding the DB');
+        };
     });
 }
 
 // 获取数据库连接 (优化版本 - 使用连接池)
 async function getDB() {
-    try {
-        // 检查现有连接是否可用
-        if (dbConnection && dbConnection.readyState !== 'closed') {
-            return dbConnection;
+    // 如果有缓存连接，先做一次轻量探测：开个只读事务；若抛 InvalidState/closing 则重开
+    if (dbConnection) {
+        try {
+            dbConnection.transaction([STORE_NAME], 'readonly'); // probe
+            return dbConnection; // 正常可用
+        } catch (e) {
+            // 连接处于 closing/closed，会在这里抛错
+            console.warn('[BackupDB] cached connection is not usable, reopening…', e);
+            try { dbConnection.close?.(); } catch {}
+            dbConnection = null;
         }
-        
-        // 创建新连接
-        dbConnection = await initDatabase();
-        return dbConnection;
-    } catch (error) {
-        console.error('[聊天自动备份] 获取数据库连接失败:', error);
-        throw error;
     }
+    dbConnection = await initDatabase();
+    return dbConnection;
 }
 
 // 保存备份到 IndexedDB (优化版本)
 async function saveBackupToDB(backup) {
-    const db = await getDB();
-    try {
+    return withDB(async (db) => {
         await new Promise((resolve, reject) => {
-            const transaction = db.transaction([STORE_NAME], 'readwrite');
-            
-            transaction.oncomplete = () => {
-                logDebug(`备份已保存到IndexedDB, 键: [${backup.chatKey}, ${backup.timestamp}]`);
-                resolve();
-            };
-            
-            transaction.onerror = (event) => {
-                console.error('[聊天自动备份] 保存备份事务失败:', event.target.error);
-                reject(event.target.error);
-            };
-            
-            const store = transaction.objectStore(STORE_NAME);
-            store.put(backup);
+            const tx = db.transaction([STORE_NAME], 'readwrite');
+            tx.oncomplete = resolve;
+            tx.onerror = (ev) => reject(ev.target.error);
+            tx.onabort  = (ev) => reject(ev.target.error);
+            tx.objectStore(STORE_NAME).put(backup);
         });
-    } catch (error) {
-        console.error('[聊天自动备份] saveBackupToDB 失败:', error);
-        throw error;
-    }
+    });
 }
 
 // 从 IndexedDB 获取指定聊天的所有备份
 async function getBackupsForChat(chatKey) {
-    const db = await getDB();
-    try {
+    return withDB(async (db) => {
         return await new Promise((resolve, reject) => {
             const transaction = db.transaction([STORE_NAME], 'readonly');
             
@@ -546,16 +572,12 @@ async function getBackupsForChat(chatKey) {
                 reject(event.target.error);
             };
         });
-    } catch (error) {
-        console.error('[聊天自动备份] getBackupsForChat 失败:', error);
-        return []; // 出错时返回空数组
-    }
+    });
 }
 
 // 从 IndexedDB 获取所有备份
 async function getAllBackups() {
-    const db = await getDB();
-    try {
+    return withDB(async (db) => {
         return await new Promise((resolve, reject) => {
             const transaction = db.transaction([STORE_NAME], 'readonly');
             
@@ -578,16 +600,12 @@ async function getAllBackups() {
                 reject(event.target.error);
             };
         });
-    } catch (error) {
-        console.error('[聊天自动备份] getAllBackups 失败:', error);
-        return [];
-    }
+    });
 }
 
 // 从 IndexedDB 获取所有备份的主键 (优化清理逻辑)
 async function getAllBackupKeys() {
-    const db = await getDB();
-    try {
+    return withDB(async (db) => {
         return await new Promise((resolve, reject) => {
             const transaction = db.transaction([STORE_NAME], 'readonly');
 
@@ -612,16 +630,12 @@ async function getAllBackupKeys() {
                 reject(event.target.error);
             };
         });
-    } catch (error) {
-        console.error('[聊天自动备份] getAllBackupKeys 失败:', error);
-        return []; // 出错时返回空数组
-    }
+    });
 } 
 
 // 从 IndexedDB 删除指定备份
 async function deleteBackup(chatKey, timestamp) {
-    const db = await getDB();
-    try {
+    return withDB(async (db) => {
         await new Promise((resolve, reject) => {
             const transaction = db.transaction([STORE_NAME], 'readwrite');
             
@@ -638,10 +652,7 @@ async function deleteBackup(chatKey, timestamp) {
             const store = transaction.objectStore(STORE_NAME);
             store.delete([chatKey, timestamp]);
         });
-    } catch (error) {
-        console.error('[聊天自动备份] deleteBackup 失败:', error);
-        throw error;
-    }
+    });
 }
 
 // --- 聊天信息获取 ---
@@ -847,7 +858,7 @@ async function executeBackupLogic_Core(settings, backupType = BACKUP_TYPE.STANDA
                 } else if (backupType === BACKUP_TYPE.SWIPE) {
                     if (clientChatMessages.length === serverChatMessages.length && clientChatMessages.length > 0) {
                         const clientLastMsg = clientChatMessages[clientChatMessages.length - 1];
-                        const serverLastMsg = serverChatMessages[serverLastMsg.length - 1];
+                        const serverLastMsg = serverChatMessages[serverChatMessages.length - 1];
                         const clientSwipes = clientLastMsg.swipes || [];
                         const serverSwipes = serverLastMsg.swipes || [];
                         if (clientLastMsg.swipe_id === serverLastMsg.swipe_id && clientSwipes.length === serverSwipes.length) {
@@ -1019,7 +1030,7 @@ async function executeBackupLogic_Core(settings, backupType = BACKUP_TYPE.STANDA
                 }
             }
         }
-        const sortedEntities = Array.from(entityMap.entries()).map(([name, data]) => ({ name, latestTimestamp: data.latestTimestamp, backups: data.backups })).sort((a, b) => b.latestTimestamp - a.timestamp);
+        const sortedEntities = Array.from(entityMap.entries()).map(([name, data]) => ({ name, latestTimestamp: data.latestTimestamp, backups: data.backups })).sort((a, b) => b.latestTimestamp - a.latestTimestamp);
         logDebug(`[Backup #${attemptId.toString().slice(-6)}] 当前有 ${sortedEntities.length} 个不同角色/群组的备份`);
         if (sortedEntities.length > settings.maxEntityCount) {
             const entitiesToRemove = sortedEntities.slice(settings.maxEntityCount);
@@ -1112,7 +1123,9 @@ function performBackupDebounced(backupType = BACKUP_TYPE.STANDARD) {
         return;
     }
 
-    const delay = currentSettings.backupDebounceDelay; // Use the current settings' delay
+    // 后台标签页适当加大防抖时间
+    const base = currentSettings.backupDebounceDelay;
+    const delay = document.visibilityState === 'hidden' ? Math.max(base, 2500) : base;
 
     logDebug(`Scheduling debounced backup (delay ${delay}ms), for ChatKey: ${scheduledChatKey}, Type: ${backupType}`);
     clearTimeout(backupTimeout); // Clear the old timer
@@ -1134,6 +1147,12 @@ function performBackupDebounced(backupType = BACKUP_TYPE.STANDARD) {
         });
         backupTimeout = null; // Clear the timer ID
     }, delay);
+}
+
+// 在高频写入场景里做"温和节流 + 空闲时提交"
+function scheduleIdle(fn) {
+    if (window.requestIdleCallback) return requestIdleCallback(() => fn());
+    return setTimeout(fn, 0);
 }
 
 // --- Manual backup ---
@@ -1475,6 +1494,17 @@ jQuery(async () => {
         console.log('[聊天自动备份] 初始化数据库');
         try {
             await initDatabase();
+            
+            // 申请持久化存储，降低被系统回收的概率
+            if (navigator.storage?.persist) {
+                try {
+                    const persisted = await navigator.storage.persist();
+                    console.log('[BackupDB] storage.persist():', persisted ? 'granted' : 'not granted');
+                } catch (e) {
+                    console.warn('[BackupDB] storage.persist() failed:', e);
+                }
+            }
+            
             return true;
         } catch (error) {
             console.error('[聊天自动备份] 数据库初始化失败:', error);
@@ -2038,7 +2068,7 @@ jQuery(async () => {
         if (event_types.CHARACTER_FIRST_MESSAGE_SELECTED) {
             eventSource.on(event_types.CHARACTER_FIRST_MESSAGE_SELECTED, () => {
                 logDebug(`Event: CHARACTER_FIRST_MESSAGE_SELECTED`);
-                performBackupDebounced(BACKUP_TYPE.STANDARD);
+                scheduleIdle(() => performBackupDebounced(BACKUP_TYPE.STANDARD));
             });
         }
 
@@ -2046,7 +2076,7 @@ jQuery(async () => {
         if (event_types.MESSAGE_SWIPED) {
             eventSource.on(event_types.MESSAGE_SWIPED, () => {
                 logDebug(`Event: MESSAGE_SWIPED`);
-                performBackupDebounced(BACKUP_TYPE.SWIPE); 
+                scheduleIdle(() => performBackupDebounced(BACKUP_TYPE.SWIPE));
             });
         }
         
@@ -2054,7 +2084,7 @@ jQuery(async () => {
         if (event_types.MESSAGE_UPDATED) { 
             eventSource.on(event_types.MESSAGE_UPDATED, () => {
                 logDebug(`Event: MESSAGE_UPDATED`);
-                performBackupDebounced(BACKUP_TYPE.STANDARD);
+                scheduleIdle(() => performBackupDebounced(BACKUP_TYPE.STANDARD));
             });
         }
 
@@ -2072,7 +2102,7 @@ jQuery(async () => {
             if (eventType) {
                 eventSource.on(eventType, () => {
                     logDebug(`Event (Other Debounced): ${eventType}`);
-                    performBackupDebounced(BACKUP_TYPE.STANDARD); 
+                    scheduleIdle(() => performBackupDebounced(BACKUP_TYPE.STANDARD));
                 });
             }
         });
