@@ -6,6 +6,7 @@ import {
 
 import {
     // --- 核心应用函数 ---
+    characters,             
     saveSettingsDebounced,
     eventSource,
     event_types,
@@ -16,7 +17,6 @@ import {
     updateChatMetadata,     // 用于更新聊天元数据
     saveChatConditional,    // 用于保存聊天
     saveChat,               // 用于插件强制保存聊天
-    characters,             // 需要访问角色列表来查找索引
     getThumbnailUrl,        // 可能需要获取头像URL
     getRequestHeaders,      // 用于API请求的头部
     openCharacterChat,      // 用于打开角色聊天
@@ -28,8 +28,10 @@ import {
     select_group_chats,     // 用于选择群组聊天
 } from '../../../group-chats.js';
 
-import { POPUP_TYPE, 
-Popup,
+import { 
+	POPUP_TYPE, 
+	Popup,
+	POPUP_RESULT,
 } from '../../../popup.js';
 
 import {
@@ -299,7 +301,7 @@ const DEFAULT_SETTINGS = {
 
 // IndexedDB 数据库名称和版本
 const DB_NAME = 'ST_ChatBackup';
-const DB_VERSION = 2; // <-- 版本号+1，触发 onupgradeneeded
+const DB_VERSION = 2; 
 const META_STORE_NAME = 'backups_meta';
 const CONTENT_STORE_NAME = 'backups_content';
 
@@ -318,7 +320,7 @@ let dbConnection = null;
 function logDebug(...args) {
     const settings = extension_settings[PLUGIN_NAME];
     if (settings && settings.debug) {
-        console.log(`[聊天自动备份][${new Date().toLocaleTimeString()}]`, ...args);
+        logDebug(`[聊天自动备份][${new Date().toLocaleTimeString()}]`, ...args);
     }
 }
 
@@ -1054,8 +1056,219 @@ async function waitForContextChange(expectedState, timeout = null) {
 }
 
 
-async function restoreBackup(backupData) {
-    logDebug('[恢复流程] 开始通过导入API恢复备份:', { chatKey: backupData.chatKey, timestamp: backupData.timestamp });
+// --- 手动恢复弹窗 ---
+async function showManualRestorePopup(backupData) {
+    const DEBUG_PREFIX = '[手动恢复调试]';
+    logDebug(`${DEBUG_PREFIX} (步骤 1) 函数开始执行。`);
+
+    // --- (步骤 2) 创建 Popup 实例，但暂不显示 ---
+    // 【核心修改】在 HTML 底部增加了说明文字的 div，并在 CSS 中为其添加了样式
+    const popupContent = `
+    <div id="manual_restore_popup_container">
+        <style>
+            #manual_restore_popup_container {
+                display: flex;
+                flex-direction: column;
+                height: 100%;
+                max-height: 70vh;
+            }
+            #manual_restore_search_wrapper {
+                padding: 5px;
+                flex-shrink: 0;
+            }
+            #manual_restore_search {
+                width: 100%;
+                padding: 8px;
+                border: 1px solid #ccc;
+                border-radius: 5px;
+            }
+            #manual_restore_char_list {
+                flex-grow: 1;
+                overflow-y: auto;
+                border: 1px solid #ddd;
+                border-radius: 5px;
+                margin-top: 10px;
+                background-color: rgba(0,0,0,0.05);
+            }
+            .manual_restore_char_item {
+                display: flex;
+                align-items: center;
+                padding: 10px 15px;
+                cursor: pointer;
+                border-bottom: 1px solid #eee;
+                transition: background-color 0.2s ease;
+                font-size: 1.1em;
+            }
+            .manual_restore_char_item:last-child {
+                border-bottom: none;
+            }
+            .manual_restore_char_item:hover {
+                background-color: rgba(138, 43, 226, 0.2);
+            }
+            .pinned_char_item {
+                background-color: rgba(255, 215, 0, 0.1);
+            }
+            .pinned_char_item::before {
+                content: '📌';
+                margin-right: 10px;
+                font-size: 1.2em;
+            }
+            #manual_restore_status_message {
+                padding: 20px;
+                text-align: center;
+                color: #888;
+            }
+            /* 【新增】为底部说明文字添加样式 */
+            .manual_restore_footer_note {
+                flex-shrink: 0; /* 防止在 flex 布局中被压缩 */
+                margin-top: 15px;
+                padding: 12px;
+                background-color: rgba(128, 128, 128, 0.1);
+                border-radius: 5px;
+                font-size: 0.9em;
+                color: #666; /* 使用柔和的灰色文字 */
+                line-height: 1.5;
+            }
+            .manual_restore_footer_note p {
+                margin: 0 0 10px 0;
+            }
+            .manual_restore_footer_note p:last-child {
+                margin-bottom: 0;
+            }
+            .manual_restore_footer_note code {
+                background-color: rgba(0, 0, 0, 0.2);
+                padding: 2px 5px;
+                border-radius: 3px;
+                font-family: monospace;
+                color: var(--SmText);
+            }
+        </style>
+        <h3>选择一个角色以恢复备份</h3>
+        <div id="manual_restore_search_wrapper">
+            <input type="text" id="manual_restore_search" placeholder="搜索角色名称...">
+        </div>
+        <div id="manual_restore_char_list">
+            <p id="manual_restore_status_message">正在初始化...</p>
+        </div>
+        
+        <!-- 底部说明文字容器 -->
+        <div class="manual_restore_footer_note">
+            <p>该<code>手动恢复</code>功能是为了应对恢复备份时，插件错误的恢复到别的角色卡中的这种特殊情况。</p>
+            <p>通常情况下，直接点击“恢复”按钮后（或者电脑使用快捷键<code>A S D</code>），插件就会自动识别正确的角色卡进行恢复备份。因此，不推荐使用<code>手动恢复</code>备份，除非插件确实将备份恢复到错误的角色卡中了。</p>
+        </div>
+    </div>`;
+
+    const popup = new Popup(popupContent, POPUP_TYPE.DISPLAY, '', {
+        wide: true,
+        large: true,
+        allowVerticalScrolling: true,
+    });
+    logDebug(`${DEBUG_PREFIX} (步骤 2) Popup 实例已在内存中创建。`);
+
+    const charListContainer = popup.content.querySelector('#manual_restore_char_list');
+    const statusMessageElement = popup.content.querySelector('#manual_restore_status_message');
+    const searchInput = popup.content.querySelector('#manual_restore_search');
+
+    if (!charListContainer || !statusMessageElement || !searchInput) {
+        console.error(`${DEBUG_PREFIX} (严重错误) 无法在Popup实例中找到必要的DOM元素。`);
+        return;
+    }
+    
+    popup.show();
+    logDebug(`${DEBUG_PREFIX} (步骤 4) 弹窗已显示，开始异步加载和排序数据...`);
+
+    try {
+        const context = getContext();
+        let characters = context.characters;
+
+        if (!characters || characters.length === 0) {
+            statusMessageElement.textContent = '正在从服务器获取角色列表...';
+            await context.getCharacters();
+            characters = context.characters;
+        }
+
+        statusMessageElement.textContent = '正在整理备份信息...';
+
+        const allMetas = await getAllBackupsMeta();
+        const backedUpCharNames = new Set(
+            allMetas
+                .filter(meta => meta.chatKey.startsWith('char_'))
+                .map(meta => meta.entityName)
+        );
+        logDebug(`${DEBUG_PREFIX} 找到 ${backedUpCharNames.size} 个已备份的角色。`);
+
+        const charactersWithIndex = characters.map((char, index) => ({
+            char: char,
+            originalIndex: index
+        }));
+
+        charactersWithIndex.sort((a, b) => {
+            const aIsBackedUp = backedUpCharNames.has(a.char.name);
+            const bIsBackedUp = backedUpCharNames.has(b.char.name);
+
+            if (aIsBackedUp && !bIsBackedUp) return -1;
+            if (!aIsBackedUp && bIsBackedUp) return 1;
+            return a.originalIndex - b.originalIndex;
+        });
+
+        if (characters.length > 0) {
+            statusMessageElement.remove();
+        } else {
+            statusMessageElement.textContent = '未找到任何角色。';
+        }
+        
+        charactersWithIndex.forEach((item) => {
+            const charItem = document.createElement('div');
+            charItem.className = 'manual_restore_char_item';
+            charItem.dataset.charIndex = item.originalIndex;
+
+            if (backedUpCharNames.has(item.char.name)) {
+                charItem.classList.add('pinned_char_item');
+            }
+            
+            charItem.innerHTML = `<span>${item.char.name}</span>`;
+            charListContainer.appendChild(charItem);
+        });
+        logDebug(`${DEBUG_PREFIX} (步骤 6) UI 列表填充完成，已置顶已备份的角色。`);
+
+        searchInput.addEventListener('input', () => {
+            const searchTerm = searchInput.value.toLowerCase();
+            const items = charListContainer.querySelectorAll('.manual_restore_char_item');
+            items.forEach(item => {
+                const name = item.querySelector('span').textContent.toLowerCase();
+                item.style.display = name.includes(searchTerm) ? 'flex' : 'none';
+            });
+        });
+
+        charListContainer.addEventListener('click', async (event) => {
+            const targetItem = event.target.closest('.manual_restore_char_item');
+            if (!targetItem) return;
+
+            const targetCharacterIndex = parseInt(targetItem.dataset.charIndex, 10);
+            const targetCharacter = characters[targetCharacterIndex];
+            const backupName = `${backupData.entityName} - ${backupData.chatName}`;
+
+            if (confirm(`确定要将备份 "${backupName}" 恢复到角色 "${targetCharacter.name}" 吗？\n\n这将在目标角色下创建一个新的聊天。`)) {
+                popup.complete(POPUP_RESULT.CANCELLED);
+                toastr.info(`正在将备份恢复到 "${targetCharacter.name}"...`, '手动恢复');
+                closeExtensionsAndBackupUI();
+                await restoreBackup(backupData, targetCharacterIndex);
+            }
+        });
+        logDebug(`${DEBUG_PREFIX} (步骤 7) 成功绑定事件，点击逻辑不受排序影响。`);
+
+    } catch (error) {
+        console.error(`${DEBUG_PREFIX} (严重错误) 在准备弹窗内容时发生错误:`, error);
+        statusMessageElement.textContent = `错误：${error.message}。详情见控制台。`;
+    }
+}
+
+async function restoreBackup(backupData, targetCharacterIndex = null) {
+    logDebug('[恢复流程] 开始通过导入API恢复备份:', {
+        chatKey: backupData.chatKey,
+        timestamp: backupData.timestamp,
+        targetIndex: targetCharacterIndex,
+    });
     logDebug('[恢复流程] 原始备份数据:', JSON.parse(JSON.stringify(backupData)));
 
     if (!backupData.chatFileContent || typeof backupData.chatFileContent !== 'string' || backupData.chatFileContent.trim().length === 0) {
@@ -1070,6 +1283,11 @@ async function restoreBackup(backupData) {
     let originalEntityId = null;
 
     if (isGroupBackup) {
+        // 如果是手动恢复到角色，则不允许恢复群组备份
+        if (targetCharacterIndex !== null) {
+            toastr.error('无法将群组聊天备份恢复到单个角色。', '恢复失败');
+            return false;
+        }
         const match = backupData.chatKey.match(/^group_([^_]+)_/);
         originalEntityId = match ? match[1] : null;
     } else {
@@ -1077,7 +1295,7 @@ async function restoreBackup(backupData) {
         originalEntityId = match ? match[1] : null;
     }
 
-    if (!originalEntityId) {
+    if (!originalEntityId && targetCharacterIndex === null) {
         toastr.error('无法从备份数据中解析原始实体ID。', '恢复失败');
         return false;
     }
@@ -1085,15 +1303,15 @@ async function restoreBackup(backupData) {
     let success = false;
 
     try {
-        if (isGroupBackup) { // 恢复到原始群组
+        if (isGroupBackup) { // 恢复到原始群组 (逻辑不变)
             const targetGroupId = originalEntityId;
             const targetGroup = getContext().groups?.find(g => g.id === targetGroupId);
-            
+
             if (!targetGroup) {
                 toastr.error(`原始群组 (ID: ${targetGroupId}) 不存在，无法恢复。`, '恢复失败');
                 return false;
             }
-            
+
             logDebug(`[恢复流程] 准备将备份导入到原始群组: ${targetGroup.name} (ID: ${targetGroupId})`);
 
             // 对于群组恢复，直接使用原始字符串创建File对象，无需解析
@@ -1116,7 +1334,7 @@ async function restoreBackup(backupData) {
                 const errorData = await response.json().catch(() => ({ error: '未知API错误' }));
                 throw new Error(`群组聊天导入API失败: ${response.status} - ${errorData.error}`);
             }
-            
+
             const importResult = await response.json();
             if (!importResult.res) {
                 throw new Error('群组聊天导入API未返回有效的聊天ID。');
@@ -1131,25 +1349,35 @@ async function restoreBackup(backupData) {
             // --- 新增：等待群组和聊天上下文确认加载 ---
             await waitForContextChange({ groupId: targetGroupId, chatId: newGroupChatId });
             logDebug(`[恢复流程] 群组和聊天上下文已确认加载。`);
-            
+
             toastr.success(`备份已作为新聊天 "${newGroupChatId}" 导入到群组 "${targetGroup.name}"！`);
             success = true;
 
-        } else { // 恢复到原始角色
-            const targetCharacterIndex = parseInt(originalEntityId, 10);
-            
-            if (isNaN(targetCharacterIndex) || targetCharacterIndex < 0 || targetCharacterIndex >= characters.length) {
-                toastr.error(`备份中的原始角色索引 (${originalEntityId}) 无效或超出范围。`, '恢复失败');
+        } else { // 恢复到角色 (原始或指定)
+            // *** 核心修改 ***
+            // 优先使用传入的 targetCharacterIndex，否则回退到从备份数据中解析
+            const finalTargetIndex = targetCharacterIndex !== null
+                ? targetCharacterIndex
+                : parseInt(originalEntityId, 10);
+
+            // --- 开始修改 ---
+            const context = getContext();
+            await context.getCharacters(); // 确保列表最新
+            const characters = context.characters;
+            // --- 修改结束 ---
+
+            if (isNaN(finalTargetIndex) || finalTargetIndex < 0 || finalTargetIndex >= characters.length) {
+                toastr.error(`目标角色索引 (${finalTargetIndex}) 无效或超出范围。`, '恢复失败');
                 return false;
             }
-            
-            const targetCharacter = characters[targetCharacterIndex];
+
+            const targetCharacter = characters[finalTargetIndex];
             if (!targetCharacter) {
-                toastr.error(`无法找到备份对应的原始角色 (索引: ${targetCharacterIndex})。`, '恢复失败');
+                toastr.error(`无法找到目标角色 (索引: ${finalTargetIndex})。`, '恢复失败');
                 return false;
             }
-            
-            logDebug(`[恢复流程] 准备将备份内容作为新聊天保存到原始角色: ${targetCharacter.name} (索引: ${targetCharacterIndex})`);
+
+            logDebug(`[恢复流程] 准备将备份内容作为新聊天保存到角色: ${targetCharacter.name} (索引: ${finalTargetIndex})`);
 
             // 只有角色聊天恢复需要解析后的数组
             let parsedContent;
@@ -1180,34 +1408,34 @@ async function restoreBackup(backupData) {
                     force: false
                 }),
             });
-            
+
             if (!saveResponse.ok) {
                 const errorText = await saveResponse.text();
                 throw new Error(`保存角色聊天API失败: ${saveResponse.status} - ${errorText}`);
             }
-            
+
             logDebug(`[恢复流程] 角色聊天内容已通过 /api/chats/save 保存为: ${newChatIdForRole}.jsonl`);
 
             // --- 新增: 等待聊天文件被服务器识别 ---
-            await waitForChatFile(targetCharacterIndex, newChatIdForRole);
+            await waitForChatFile(finalTargetIndex, newChatIdForRole);
 
             // 2. 检查并切换角色 (如果需要)
             const currentContextBeforeOpen = getContext();
-            if (String(currentContextBeforeOpen.characterId) !== String(targetCharacterIndex)) {
-                logDebug(`[恢复流程] 当前角色 (ID: ${currentContextBeforeOpen.characterId}) 与目标 (索引: ${targetCharacterIndex}) 不同，执行切换...`);
-                await selectCharacterById(targetCharacterIndex);
+            if (String(currentContextBeforeOpen.characterId) !== String(finalTargetIndex)) {
+                logDebug(`[恢复流程] 当前角色 (ID: ${currentContextBeforeOpen.characterId}) 与目标 (索引: ${finalTargetIndex}) 不同，执行切换...`);
+                await selectCharacterById(finalTargetIndex);
 
                 // --- 新增: 等待角色上下文更新 ---
-                await waitForContextChange({ characterId: targetCharacterIndex });
-                logDebug(`[恢复流程] 已切换到目标角色 (索引: ${targetCharacterIndex})`);
+                await waitForContextChange({ characterId: finalTargetIndex });
+                logDebug(`[恢复流程] 已切换到目标角色 (索引: ${finalTargetIndex})`);
             } else {
-                logDebug(`[恢复流程] 当前已在目标角色 (索引: ${targetCharacterIndex}) 上下文中，无需切换。`);
+                logDebug(`[恢复流程] 当前已在目标角色 (索引: ${finalTargetIndex}) 上下文中，无需切换。`);
             }
 
             // 3. 打开新保存的聊天文件
             logDebug(`[恢复流程] 正在打开新聊天: ${newChatIdForRole}`);
             await openCharacterChat(newChatIdForRole);
-            
+
             // --- 新增: 等待聊天被加载到上下文中 ---
             await waitForContextChange({ chatId: newChatIdForRole });
             logDebug(`[恢复流程] 聊天 "${newChatIdForRole}" 已确认加载。`);
@@ -1219,7 +1447,7 @@ async function restoreBackup(backupData) {
         if (success) {
             logDebug('[恢复流程] 恢复流程成功完成。');
             if (typeof updateBackupsList === 'function') {
-                 await updateBackupsList(); 
+                 await updateBackupsList();
             }
         }
         return success;
@@ -1271,6 +1499,13 @@ async function updateBackupsList() {
                 ? fullPreviewText.slice(0, maxPreviewLength) + '...'
                 : fullPreviewText;
 
+            // 检查是否为群组备份，如果是，则禁用"手动恢复"按钮
+            const isGroupBackup = meta.chatKey.startsWith('group_');
+            const manualRestoreButton = isGroupBackup
+                ? `<button class="menu_button" disabled title="群组备份不支持恢复到角色">手动恢复</button>`
+                : `<button class="menu_button backup_manual_restore" title="将此备份恢复到指定角色" data-timestamp="${meta.timestamp}" data-key="${meta.chatKey}">手动恢复</button>`;
+
+
             const backupItem = $(`
                 <div class="backup_item">
                     <div class="backup_info">
@@ -1288,6 +1523,7 @@ async function updateBackupsList() {
                         <button class="menu_button backup_preview_btn" title="预览此备份的最后两条消息" data-timestamp="${meta.timestamp}" data-key="${meta.chatKey}">预览</button>
                         <button class="menu_button backup_restore" title="恢复此备份到新聊天" data-timestamp="${meta.timestamp}" data-key="${meta.chatKey}">恢复</button>
                         <button class="menu_button danger_button backup_delete" title="删除此备份" data-timestamp="${meta.timestamp}" data-key="${meta.chatKey}">删除</button>
+                        ${manualRestoreButton}
                     </div>
                 </div>
             `);
@@ -1322,7 +1558,7 @@ jQuery(async () => {
             if (navigator.storage?.persist) {
                 try {
                     const persisted = await navigator.storage.persist();
-                    console.log('[BackupDB] storage.persist():', persisted ? 'granted' : 'not granted');
+                    logDebug('[BackupDB] storage.persist():', persisted ? 'granted' : 'not granted');
                 } catch (e) {
                     console.warn('[BackupDB] storage.persist() failed:', e);
                 }
@@ -1539,6 +1775,33 @@ jQuery(async () => {
                     toastr.error(`删除备份失败: ${error.message}`);
                     button.prop('disabled', false).text('删除');
                 }
+            }
+        });
+
+        // 手动恢复按钮
+        $(document).on('click', '.backup_manual_restore', async function() {
+            const button = $(this);
+            const timestamp = parseInt(button.data('timestamp'));
+            const chatKey = button.data('key');
+            logDebug(`点击手动恢复按钮, timestamp: ${timestamp}, chatKey: ${chatKey}`);
+
+            button.prop('disabled', true).text('加载中...');
+
+            try {
+                const backup = await getFullBackup(chatKey, timestamp);
+                if (!backup) {
+                    toastr.error('找不到指定的备份');
+                    return;
+                }
+
+                // 显示角色选择弹窗
+                await showManualRestorePopup(backup);
+
+            } catch (error) {
+                console.error('[聊天自动备份] 打开手动恢复弹窗时出错:', error);
+                toastr.error(`操作失败: ${error.message}`);
+            } finally {
+                button.prop('disabled', false).text('手动恢复');
             }
         });
 
@@ -2354,7 +2617,7 @@ function showHelpPopup() {
         <hr>
         <h1>使用方式</h1>
 
-        <!-- 【新增】视频演示 -->
+        <!-- 视频演示 -->
         <video 
             src="https://files.catbox.moe/xij4li.mp4" 
             autoplay 
@@ -2363,13 +2626,13 @@ function showHelpPopup() {
             playsinline
             style="width: 100%; max-width: 500px; border-radius: 8px; margin: 10px auto; display: block;">
         </video>
-        <!-- 【新增结束】 -->
 
         <ul>
             <li>点击每条备份右侧的 <code>恢复</code> 按钮，即可<strong>一键恢复</strong>至对应角色卡/群聊。</li>
             <li><strong>电脑用户</strong>支持快捷键，键盘同时按下 <code>A  S  D</code> 三个键，<strong>可以直接快速恢复</strong>备份记录，无需打开备份页面。</li>
             <li>点击 <code>预览</code> 可查看该备份中的<strong>最后两条对话消息</strong>。</li>
             <li><code>删除</code> 按钮用于<strong>移除当前备份</strong>。</li>
+            <li><code>手动恢复</code> 按钮用于<strong>将该备份手动恢复到指定的角色卡中</strong>（用来解决插件错误的恢复备份到别的角色卡的特殊情况）。</li>
         </ul>
         <hr>
         <h1>其他说明</h1>
