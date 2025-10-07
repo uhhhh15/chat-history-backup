@@ -281,11 +281,17 @@ function constructJsonlString(metadata, messages) {
         console.error('[CONSTRUCT] 无效的元数据或消息数组传入 constructJsonlString');
         return '';
     }
-    let jsonlString = JSON.stringify(metadata) + '\n';
-    messages.forEach(message => {
-        jsonlString += JSON.stringify(message) + '\n';
-    });
-    return jsonlString;
+    
+    // 使用 join 方法，性能更好
+    const lines = new Array(messages.length + 1);
+    lines[0] = JSON.stringify(metadata);
+    
+    for (let i = 0; i < messages.length; i++) {
+        lines[i + 1] = JSON.stringify(messages[i]);
+    }
+    
+    // 注意：最后的 \n 是必需的，符合 JSONL 规范
+    return lines.join('\n') + '\n';
 }
 
 // 扩展名和设置初始化
