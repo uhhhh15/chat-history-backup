@@ -320,7 +320,8 @@ let dbConnection = null;
 function logDebug(...args) {
     const settings = extension_settings[PLUGIN_NAME];
     if (settings && settings.debug) {
-        logDebug(`[聊天自动备份][${new Date().toLocaleTimeString()}]`, ...args);
+        // 使用 console.log 来实际输出日志
+        console.log(`[聊天自动备份][${new Date().toLocaleTimeString()}]`, ...args);
     }
 }
 
