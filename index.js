@@ -343,7 +343,7 @@ self.onmessage = function(e) {
     try {
         let result;
 
-        // --- 新增分支：处理从 API 获取的完整JSON数组字符串 ---
+        // --- 分支：处理从 API 获取的完整JSON数组字符串 ---
         if (options.parseJsonArrayString) {
             const fullArray = JSON.parse(jsonlString); // 在Worker中执行重量级解析
             const messages = fullArray.slice(1);
@@ -508,7 +508,7 @@ function initDatabase() {
     });
 }
 
-// 获取数据库连接 (优化版本 - 使用连接池)
+// 获取数据库连接 (使用连接池)
 async function getDB() {
     // 如果有缓存连接，先做一次轻量探测：开个只读事务；若抛 InvalidState/closing 则重开
     if (dbConnection) {
@@ -546,7 +546,7 @@ async function withDB(op, retries = 3) {
     }
 }
 
-// 保存备份到 IndexedDB (重构版 - 分离元数据和内容)
+// 保存备份到 IndexedDB (分离元数据和内容)
 async function saveBackupToDB(backupMeta, backupContent) {
     return withDB(async (db) => {
         await new Promise((resolve, reject) => {
@@ -602,7 +602,7 @@ async function getFullBackup(chatKey, timestamp) {
     });
 } 
 
-// 从 IndexedDB 删除指定备份 (重构版)
+// 从 IndexedDB 删除指定备份
 async function deleteBackup(chatKey, timestamp) {
     return withDB(async (db) => {
         await new Promise((resolve, reject) => {
@@ -680,7 +680,7 @@ function getCurrentChatInfo() {
 }
 
 
-// --- 核心备份逻辑封装 (重构版 - 文本流处理) ---
+// --- 核心备份逻辑封装 (文本流处理) ---
 async function executeBackupLogic_Core(settings, backupType = BACKUP_TYPE.STANDARD, attemptId, forceSave = false) {
     logDebug(`[Backup #${attemptId.toString().slice(-6)}] executeBackupLogic_Core started. Type: ${backupType}, ForceSave: ${forceSave}`);
 
@@ -701,7 +701,7 @@ async function executeBackupLogic_Core(settings, backupType = BACKUP_TYPE.STANDA
 
         const { entityName, chatName } = getCurrentChatInfo();
 
-        // ★ 关键修正：在函数作用域顶部声明所有需要跨分支使用的变量
+        // ★ 在函数作用域顶部声明所有需要跨分支使用的变量
         let jsonlString = null;
         let originalChatMessagesCount = 0;
         let lastTwoMessages = [];
@@ -779,7 +779,7 @@ async function executeBackupLogic_Core(settings, backupType = BACKUP_TYPE.STANDA
                 jsonlString = constructJsonlString(serverChatMetadata, messagesFromAPI);
                 originalChatMessagesCount = messagesFromAPI.length;
 
-                // ★ 关键修正：为群组聊天路径计算所有必要的变量
+                // ★ 为群组聊天路径计算所有必要的变量
                 lastTwoMessages = messagesFromAPI.slice(-2);
                 lastMsgIndex = originalChatMessagesCount > 0 ? originalChatMessagesCount - 1 : -1;
                 const lastMessage = lastTwoMessages.length > 0 ? lastTwoMessages[lastTwoMessages.length - 1] : null;
@@ -808,7 +808,7 @@ async function executeBackupLogic_Core(settings, backupType = BACKUP_TYPE.STANDA
 
                 const workerResult = await parseJsonlInWorker(rawJsonArrayString, { parseJsonArrayString: true });
 
-                // ★ 关键修正：将 Worker 返回的结果赋值给顶层作用域的变量
+                // ★ 将 Worker 返回的结果赋值给顶层作用域的变量
                 originalChatMessagesCount = workerResult.messageCount;
                 lastTwoMessages = workerResult.lastTwoMessages;
                 const fullParsedArray = workerResult.fullParsedArray;
@@ -837,7 +837,7 @@ async function executeBackupLogic_Core(settings, backupType = BACKUP_TYPE.STANDA
 
         logDebug(`[Backup #${attemptId.toString().slice(-6)}] Got chat content as text, size: ${Math.round(jsonlString.length / 1024)} KB.`);
 
-        // ★ 关键修正：移除所有冗余的计算逻辑。所有变量至此都已准备就绪。
+        // ★ 所有变量至此都已准备就绪。
 
         // 创建元数据和内容对象
         const key = { chatKey, timestamp: currentTimestamp };
@@ -857,7 +857,7 @@ async function executeBackupLogic_Core(settings, backupType = BACKUP_TYPE.STANDA
         await saveBackupToDB(backupMeta, backupContent);
         logDebug(`[Backup #${attemptId.toString().slice(-6)}] New backup saved.`);
 
-        // --- 清理逻辑 (保持不变) ---
+        // --- 清理逻辑 ---
         let allMetas = await getAllBackupsMeta();
         const currentEntityBackups = allMetas.filter(m => m.entityName === entityName);
         if (currentEntityBackups.length > settings.maxBackupsPerEntity) {
@@ -1009,7 +1009,7 @@ async function performManualBackup() {
     }
 }
 
-// --- 恢复逻辑 (重构版) ---
+// --- 恢复逻辑 ---
 
 /**
  * [新增辅助函数] 等待，直到指定的聊天文件出现在角色的聊天列表中。
@@ -1069,7 +1069,7 @@ async function showManualRestorePopup(backupData) {
     logDebug(`${DEBUG_PREFIX} (步骤 1) 函数开始执行。`);
 
     // --- (步骤 2) 创建 Popup 实例，但暂不显示 ---
-    // 【核心修改】在 HTML 底部增加了说明文字的 div，并在 CSS 中为其添加了样式
+    // 在 HTML 底部增加了说明文字的 div，并在 CSS 中为其添加了样式
     const popupContent = `
     <div id="manual_restore_popup_container">
         <style>
@@ -2736,3 +2736,4 @@ function filterSpecialTags(text) {
         .replace(SPECIAL_TAGS_REGEX.htmlEscape.apos, "&#039;");
 
 }
+
