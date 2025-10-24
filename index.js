@@ -6,7 +6,7 @@ import {
 
 import {
     // --- 核心应用函数 ---
-    characters,             
+    characters,
     saveSettingsDebounced,
     eventSource,
     event_types,
@@ -21,6 +21,7 @@ import {
     getRequestHeaders,      // 用于API请求的头部
     openCharacterChat,      // 用于打开角色聊天
     getPastCharacterChats,  // 获取角色的聊天列表
+    getCharacters,          // 用于获取角色列表
 } from '../../../../script.js';
 
 import {
@@ -1195,8 +1196,8 @@ async function showManualRestorePopup(backupData) {
 
         if (!characters || characters.length === 0) {
             statusMessageElement.textContent = '正在从服务器获取角色列表...';
-            await context.getCharacters();
-            characters = context.characters;
+            await getCharacters();
+            characters = getContext().characters;
         }
 
         statusMessageElement.textContent = '正在整理备份信息...';
@@ -1373,9 +1374,8 @@ async function restoreBackup(backupData, targetCharacterIndex = null) {
                 : parseInt(originalEntityId, 10);
 
             // --- 开始修改 ---
-            const context = getContext();
-            await context.getCharacters(); // 确保列表最新
-            const characters = context.characters;
+            // 直接从上下文中获取已加载的角色列表，避免调用 getCharacters() 引入副作用
+            const characters = getContext().characters;
             // --- 修改结束 ---
 
             if (isNaN(finalTargetIndex) || finalTargetIndex < 0 || finalTargetIndex >= characters.length) {
