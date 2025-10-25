@@ -212,7 +212,7 @@ async function fetchGroupChatMessages(groupId, groupChatId) {
 
 
 /**
- * [新增优化函数] 通过流式读取，仅获取聊天文件的第一行（元数据）就中断请求。
+ * 通过流式读取，仅获取聊天文件的第一行（元数据）就中断请求。
  * @param {string} characterName - 角色名称
  * @param {string} chatFileName - 聊天文件名 (不带 .jsonl)
  * @param {string} avatarFileName - 角色头像文件名
@@ -532,7 +532,7 @@ async function getDB() {
     return dbConnection;
 }
 
-// 为所有 DB 操作加"失败重试（遇到 closing 则重开）"
+// 为所有 DB 操作加"失败重试（遇到 closing 则重开）
 async function withDB(op, retries = 3) {
     for (let i = 0; i <= retries; i++) {
         const db = await getDB();
@@ -686,7 +686,7 @@ function getCurrentChatInfo() {
 }
 
 
-// --- 核心备份逻辑封装 (重构版 - 文本流处理) ---
+// --- 核心备份逻辑封装 (文本流处理) ---
 async function executeBackupLogic_Core(settings, backupType = BACKUP_TYPE.STANDARD, attemptId, forceSave = false) {
     logDebug(`[Backup #${attemptId.toString().slice(-6)}] executeBackupLogic_Core started. Type: ${backupType}, ForceSave: ${forceSave}`);
 
@@ -814,7 +814,7 @@ async function executeBackupLogic_Core(settings, backupType = BACKUP_TYPE.STANDA
 
                 const workerResult = await parseJsonlInWorker(rawJsonArrayString, { parseJsonArrayString: true });
 
-                // ★ 关键修正：将 Worker 返回的结果赋值给顶层作用域的变量
+                // 将 Worker 返回的结果赋值给顶层作用域的变量
                 originalChatMessagesCount = workerResult.messageCount;
                 lastTwoMessages = workerResult.lastTwoMessages;
                 const fullParsedArray = workerResult.fullParsedArray;
@@ -843,7 +843,7 @@ async function executeBackupLogic_Core(settings, backupType = BACKUP_TYPE.STANDA
 
         logDebug(`[Backup #${attemptId.toString().slice(-6)}] Got chat content as text, size: ${Math.round(jsonlString.length / 1024)} KB.`);
 
-        // ★ 关键修正：移除所有冗余的计算逻辑。所有变量至此都已准备就绪。
+        // 移除所有冗余的计算逻辑。所有变量至此都已准备就绪。
 
         // 创建元数据和内容对象
         const key = { chatKey, timestamp: currentTimestamp };
@@ -863,7 +863,7 @@ async function executeBackupLogic_Core(settings, backupType = BACKUP_TYPE.STANDA
         await saveBackupToDB(backupMeta, backupContent);
         logDebug(`[Backup #${attemptId.toString().slice(-6)}] New backup saved.`);
 
-        // --- 清理逻辑 (保持不变) ---
+        // --- 清理逻辑 ---
         let allMetas = await getAllBackupsMeta();
         const currentEntityBackups = allMetas.filter(m => m.entityName === entityName);
         if (currentEntityBackups.length > settings.maxBackupsPerEntity) {
@@ -1015,7 +1015,7 @@ async function performManualBackup() {
     }
 }
 
-// --- 恢复逻辑 (重构版) ---
+// --- 恢复逻辑 ---
 
 /**
  * [新增辅助函数] 等待，直到指定的聊天文件出现在角色的聊天列表中。
@@ -1044,7 +1044,7 @@ async function waitForChatFile(charId, chatFileNameToFind, timeout = null) {
 }
 
 /**
- * [新增辅助函数] 等待，直到SillyTavern的上下文（Context）更新为指定状态。
+ * [辅助函数] 等待，直到SillyTavern的上下文（Context）更新为指定状态。
  * @param {object} expectedState - 期望的上下文状态，例如 { characterId: '123', chatId: 'new_chat' }
  * @param {number} timeout - 超时时间 (毫秒)
  * @returns {Promise<void>}
@@ -1075,7 +1075,6 @@ async function showManualRestorePopup(backupData) {
     logDebug(`${DEBUG_PREFIX} (步骤 1) 函数开始执行。`);
 
     // --- (步骤 2) 创建 Popup 实例，但暂不显示 ---
-    // 【核心修改】在 HTML 底部增加了说明文字的 div，并在 CSS 中为其添加了样式
     const popupContent = `
     <div id="manual_restore_popup_container">
         <style>
@@ -1131,7 +1130,7 @@ async function showManualRestorePopup(backupData) {
                 text-align: center;
                 color: #888;
             }
-            /* 【新增】为底部说明文字添加样式 */
+            /* 为底部说明文字添加样式 */
             .manual_restore_footer_note {
                 flex-shrink: 0; /* 防止在 flex 布局中被压缩 */
                 margin-top: 15px;
@@ -1359,7 +1358,7 @@ async function restoreBackup(backupData, targetCharacterIndex = null) {
             logDebug(`[恢复流程] 正在加载新导入的群组聊天: ${newGroupChatId} 到群组 ${targetGroupId}...`);
             await select_group_chats(targetGroupId, newGroupChatId);
 
-            // --- 新增：等待群组和聊天上下文确认加载 ---
+            // --- 等待群组和聊天上下文确认加载 ---
             await waitForContextChange({ groupId: targetGroupId, chatId: newGroupChatId });
             logDebug(`[恢复流程] 群组和聊天上下文已确认加载。`);
 
@@ -1367,16 +1366,13 @@ async function restoreBackup(backupData, targetCharacterIndex = null) {
             success = true;
 
         } else { // 恢复到角色 (原始或指定)
-            // *** 核心修改 ***
             // 优先使用传入的 targetCharacterIndex，否则回退到从备份数据中解析
             const finalTargetIndex = targetCharacterIndex !== null
                 ? targetCharacterIndex
                 : parseInt(originalEntityId, 10);
 
-            // --- 开始修改 ---
             // 直接从上下文中获取已加载的角色列表，避免调用 getCharacters() 引入副作用
             const characters = getContext().characters;
-            // --- 修改结束 ---
 
             if (isNaN(finalTargetIndex) || finalTargetIndex < 0 || finalTargetIndex >= characters.length) {
                 toastr.error(`目标角色索引 (${finalTargetIndex}) 无效或超出范围。`, '恢复失败');
@@ -1406,7 +1402,23 @@ async function restoreBackup(backupData, targetCharacterIndex = null) {
             }
 
             const newChatIdForRole = `${originalChatName}.jsonl`.replace('.jsonl', '');
-            const chatToSaveForRole = parsedContent; // API需要完整的数组 [meta, ...messages]
+            let chatToSaveForRole = parsedContent; // API需要完整的数组 [meta, ...messages]
+
+            // --- 同步元数据中的角色和用户名 ---
+            // 这是解决 400 Bad Request 错误的关键。
+            // 服务器会校验顶层的 ch_name 和 chat[0].character_name 是否一致。
+            if (chatToSaveForRole && Array.isArray(chatToSaveForRole) && chatToSaveForRole.length > 0 && typeof chatToSaveForRole[0] === 'object') {
+                const metadata = chatToSaveForRole[0];
+                const currentUserName = getContext().name1; // 获取当前用户名
+
+                logDebug(`[恢复流程] 正在修正元数据: old_char="${metadata.character_name}", new_char="${targetCharacter.name}"; old_user="${metadata.user_name}", new_user="${currentUserName}"`);
+
+                metadata.character_name = targetCharacter.name;
+                metadata.user_name = currentUserName;
+            } else {
+                // 如果备份数据格式不正确，抛出错误以中断恢复流程
+                throw new Error('备份数据格式错误：无法找到有效的元数据对象。');
+            }
 
             // 1. 保存新的聊天文件
             const saveResponse = await fetch('/api/chats/save', {
@@ -1428,7 +1440,7 @@ async function restoreBackup(backupData, targetCharacterIndex = null) {
 
             logDebug(`[恢复流程] 角色聊天内容已通过 /api/chats/save 保存为: ${newChatIdForRole}.jsonl`);
 
-            // --- 新增: 等待聊天文件被服务器识别 ---
+            // --- 等待聊天文件被服务器识别 ---
             await waitForChatFile(finalTargetIndex, newChatIdForRole);
 
             // 2. 检查并切换角色 (如果需要)
@@ -1437,7 +1449,7 @@ async function restoreBackup(backupData, targetCharacterIndex = null) {
                 logDebug(`[恢复流程] 当前角色 (ID: ${currentContextBeforeOpen.characterId}) 与目标 (索引: ${finalTargetIndex}) 不同，执行切换...`);
                 await selectCharacterById(finalTargetIndex);
 
-                // --- 新增: 等待角色上下文更新 ---
+                // --- 等待角色上下文更新 ---
                 await waitForContextChange({ characterId: finalTargetIndex });
                 logDebug(`[恢复流程] 已切换到目标角色 (索引: ${finalTargetIndex})`);
             } else {
@@ -1448,7 +1460,7 @@ async function restoreBackup(backupData, targetCharacterIndex = null) {
             logDebug(`[恢复流程] 正在打开新聊天: ${newChatIdForRole}`);
             await openCharacterChat(newChatIdForRole);
 
-            // --- 新增: 等待聊天被加载到上下文中 ---
+            // --- 等待聊天被加载到上下文中 ---
             await waitForContextChange({ chatId: newChatIdForRole });
             logDebug(`[恢复流程] 聊天 "${newChatIdForRole}" 已确认加载。`);
 
@@ -1515,7 +1527,7 @@ async function updateBackupsList() {
             const isGroupBackup = meta.chatKey.startsWith('group_');
             const manualRestoreButton = isGroupBackup
                 ? `<button class="menu_button" disabled title="群组备份不支持恢复到角色">手动恢复</button>`
-                : `<button class="menu_button backup_manual_restore" title="将此备份恢复到指定角色" data-timestamp="${meta.timestamp}" data-key="${meta.chatKey}">手动恢复</button>`;
+                : `<button class="menu_button backup_manual_restore" title="将此备份恢复到指定角色" data-timestamp="${meta.timestamp}" data-key="${meta.chatKey}">手动</button>`;
 
 
             const backupItem = $(`
@@ -2497,14 +2509,11 @@ function setUserConfirmedRestore(confirmed) {
     logDebug(`[聊天自动备份] 用户恢复确认状态已保存为: ${confirmed}`);
 }
 
-// index.js (修正后的版本)
-
 // 添加一个函数来关闭扩展面板和备份UI
 function closeExtensionsAndBackupUI() {
     // 关闭主扩展页面
     const extensionsBlock = $('#rm_extensions_block');
     if (extensionsBlock.length) {
-        // --- 修正 ---
         // 只使用SillyTavern的类和属性来关闭抽屉，移除强制的内联样式
         extensionsBlock.removeClass('openDrawer').addClass('closedDrawer');
         extensionsBlock.attr('data-slide-toggle', 'hidden');
@@ -2514,7 +2523,6 @@ function closeExtensionsAndBackupUI() {
     // 关闭备份UI的内容部分
     const backupContent = $('#chat_auto_backup_settings .inline-drawer-content');
     if (backupContent.length) {
-        // --- 修正 ---
         // 同样，只通过移除父元素的 'open' 类来关闭内部抽屉
         // backupContent.css('display', 'none'); // <-- 已移除此行
         const drawerParent = backupContent.closest('.inline-drawer');
