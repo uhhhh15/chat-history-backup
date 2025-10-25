@@ -1668,12 +1668,6 @@ jQuery(async () => {
             const $settingsBlock = $('<div class="chat_backup_control_item"></div>');
             $settingsBlock.html(`
                 <div style="margin-bottom: 8px;">
-                    <label style="display: inline-block; min-width: 120px;">防抖延迟 (ms):</label>
-                    <input type="text" id="chat_backup_debounce_delay" value="${settings.backupDebounceDelay}" 
-                        title="编辑或删除消息后，等待多少毫秒再执行备份 (建议 1000-1500)" 
-                        style="width: 80px;" inputmode="numeric" />
-                </div>
-                <div style="margin-bottom: 8px;">
                     <label style="display: inline-block; min-width: 120px;">最大角色/群组数:</label>
                     <input type="text" id="chat_backup_max_entity" value="${settings.maxEntityCount}" 
                         title="保留多少个不同角色/群组的备份" 
@@ -2536,8 +2530,8 @@ function closeExtensionsAndBackupUI() {
 function setupHelpButton() {
     // 首先确保使用说明按钮已添加到HTML中
     if ($('#chat_backup_help_button').length === 0) {
-        const helpButton = $('<button id="chat_backup_help_button" class="menu_button"><i class="fa-solid fa-circle-question"></i> 使用说明</button>');
-        const backupButton = $('<button id="chat_backup_manual_backup" class="menu_button"><i class="fa-solid fa-floppy-disk"></i> 立即备份</button>');
+        const helpButton = $('<button id="chat_backup_help_button" class="menu_button">使用说明</button>');
+        const backupButton = $('<button id="chat_backup_manual_backup" class="menu_button">立即备份</button>');
         
         // 创建包含两个按钮的容器
         const buttonContainer = $('<div class="chat_backup_control_item"></div>').append(helpButton).append(backupButton);
