@@ -1429,7 +1429,7 @@ async function restoreBackup(backupData, targetCharacterIndex = null) {
                     file_name: newChatIdForRole,
                     chat: chatToSaveForRole,
                     avatar_url: targetCharacter.avatar,
-                    force: false
+                    force: true // 不进行完整性检查，避免恢复失败
                 }),
             });
 
@@ -2743,3 +2743,4 @@ function filterSpecialTags(text) {
         .replace(SPECIAL_TAGS_REGEX.htmlEscape.apos, "&#039;");
 
 }
+
